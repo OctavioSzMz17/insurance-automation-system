@@ -1,187 +1,239 @@
-"""Self-healing validation pipeline.
+"""Self-healing validation pipeline (Rule 5) — B2.4.
 
-Validates agent output against business constraints and retries on failure.
-Implements Rule 5 from AI rules: Self-Healing Validation Pipeline.
+Wraps an agent run with output validation + retry logic:
+
+    1. Call agent.run(input)
+    2. Validate output against the configured validators
+    3. If valid           → return state (success)
+    4. If invalid AND attempt < max_attempts:
+            attach violations to input as `previous_attempt_error`
+            increment retry_count, loop back to step 1
+    5. If max_attempts exhausted:
+            force decision/status to MANUAL_REVIEW
+            return state with last_error set
+
+Every attempt + violation is logged.
+
+Rules applied:
+    Rule 4  — Reasoning trail preserved; agents get a fair retry with feedback
+    Rule 5  — 3-attempt cap, MANUAL_REVIEW escalation
+    Rule 9  — Structured logging on every attempt
+    Rule 11 — Type hints throughout
 """
 
-from typing import Any, Dict, Optional
-from enum import Enum
-from pydantic import BaseModel
-from datetime import datetime
+from __future__ import annotations
+
 import logging
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, Protocol
 
-from observability.logging import logger
+from .models import ConstraintViolation, ValidationError, ValidationResult
 
-# Import claim_status enum from common schemas
-# from packages.common.schemas.claim import ClaimStatus
-# from packages.common.schemas.claim import Claim
-
-
-class ValidationError(Exception):
-    """Raised when agent output fails validation."""
-    pass
+logger = logging.getLogger(__name__)
 
 
-class ConstraintViolation(BaseModel):
-    """Represents a single constraint violation."""
-    field: str
-    rule: str
-    actual_value: Any
-    expected_constraint: str
-    severity: str  # "error" or "warning"
+# Validator signature: (agent_output, context) → list of violations
+ValidatorFn = Callable[..., list[ConstraintViolation]]
 
 
-class ValidationResult(BaseModel):
-    """Result of validation."""
-    is_valid: bool
-    violations: list[ConstraintViolation] = []
-    retry_count: int = 0
-    timestamp: datetime
+class _RunnableAgent(Protocol):
+    """Duck-typed protocol for anything ValidationPipeline can wrap."""
+    role: str
+    async def run(self, agent_input: dict[str, Any]) -> Any: ...  # returns AgentState
 
 
-def validate_agent_output(
-    agent_output: Dict[str, Any],
-    agent_type: str  # "analyst" or "auditor"
-) -> ValidationResult:
-    """Validate agent output against business constraints.
+class ValidationPipeline:
+    """Wraps an agent run with validation + retry.
 
-    Args:
-        agent_output: The agent's structured output
-        agent_type: Type of agent ("analyst" or "auditor")
-
-    Returns:
-        ValidationResult with violations if any
-
-    Note:
-        This function checks:
-        - claim_status is valid enum value (APPROVED, REJECTED, MANUAL_REVIEW, AWAITING_INPUT)
-        - reported_damage_amount >= 0 if present
-        - incident_date is a valid date
-        - severity_label is valid enum value (LOW, HIGH, TOTAL_LOSS)
-        - ai_reasoning is not empty
+    Attributes:
+        validator:     Callable producing ConstraintViolation list.
+                       Signature: (agent_output, **context) -> list[ConstraintViolation].
+        max_attempts:  Total tries allowed (default 3 per Rule 5).
+        agent_kind:    "analyst" or "auditor" — only used for logging + escalation.
     """
-    # TODO: Implement validation logic
-    # Example constraints:
-    #
-    # if agent_type == "auditor":
-    #     # Auditor must provide a decision
-    #     if "claim_status" not in agent_output:
-    #         raise ConstraintViolation(...)
-    #     # Decision cannot be null
-    #     if agent_output["claim_status"] is None:
-    #         raise ConstraintViolation(...)
-    #
-    # if "reported_damage_amount" in agent_output:
-    #     if agent_output["reported_damage_amount"] < 0:
-    #         raise ConstraintViolation(...)
-    #
-    # if "ai_reasoning" not in agent_output or not agent_output["ai_reasoning"]:
-    #     raise ConstraintViolation(...)
 
-    logger.info(f"Validating {agent_type} agent output")
+    def __init__(
+        self,
+        validator:    ValidatorFn,
+        agent_kind:   str,
+        max_attempts: int = 3,
+    ) -> None:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be >= 1")
+        self.validator    = validator
+        self.agent_kind   = agent_kind
+        self.max_attempts = max_attempts
 
-    return ValidationResult(
-        is_valid=True,
-        violations=[],
-        retry_count=0,
-        timestamp=datetime.utcnow()
-    )
+    # ── public entry point ────────────────────────────────────────
+
+    async def run(
+        self,
+        agent:        _RunnableAgent,
+        agent_input:  dict[str, Any],
+        **validator_context: Any,
+    ) -> Any:
+        """Run `agent` with validation + retry. Returns the agent's AgentState.
+
+        Args:
+            agent:               Any object with async .run(input) → AgentState.
+            agent_input:         The input passed to agent.run on attempt 1.
+            **validator_context: Extra kwargs passed to the validator on every call
+                                 (e.g. triage_report=... for the decision validator).
+        """
+        last_violations: list[ConstraintViolation] = []
+        state: Any = None
+
+        # Make a shallow copy so we can mutate without affecting the caller
+        current_input = dict(agent_input)
+
+        for attempt in range(1, self.max_attempts + 1):
+            logger.info(
+                f"ValidationPipeline | agent={self.agent_kind} attempt={attempt}/{self.max_attempts}"
+            )
+
+            # 1. Run the agent
+            try:
+                state = await agent.run(current_input)
+            except Exception as e:
+                last_violations = [ConstraintViolation(
+                    field="<agent>",
+                    rule="agent_exception",
+                    actual_value=str(e)[:200],
+                    expected_constraint="agent.run must return cleanly",
+                )]
+                logger.error(f"Agent raised on attempt {attempt}: {e}")
+                self._prepare_retry_input(current_input, last_violations, attempt)
+                continue
+
+            # 2. Did the agent itself fail (state.last_error set, no result)?
+            if state.last_error or state.result is None:
+                last_violations = [ConstraintViolation(
+                    field="<agent>",
+                    rule="agent_returned_no_result",
+                    actual_value=state.last_error or "result is None",
+                    expected_constraint="non-null structured result",
+                )]
+                logger.warning(
+                    f"Agent had no usable result on attempt {attempt}: {state.last_error}"
+                )
+                self._prepare_retry_input(current_input, last_violations, attempt)
+                continue
+
+            # 3. Validate the agent's output
+            violations = self.validator(state.result, **validator_context)
+            result_obj = ValidationResult(
+                is_valid=not violations,
+                violations=violations,
+                attempt=attempt,
+                timestamp=datetime.now(timezone.utc),
+            )
+            state.log_step(
+                "validation",
+                is_valid=result_obj.is_valid,
+                violations=[v.model_dump() for v in violations],
+                attempt=attempt,
+            )
+
+            if result_obj.is_valid:
+                logger.info(
+                    f"ValidationPipeline | agent={self.agent_kind} attempt={attempt} PASSED"
+                )
+                state.retry_count = attempt - 1
+                return state
+
+            # 4. Failed — record + prepare for next attempt
+            last_violations = violations
+            logger.warning(
+                f"ValidationPipeline | agent={self.agent_kind} attempt={attempt} "
+                f"FAILED with {len(violations)} violation(s): "
+                f"{[v.rule for v in violations]}"
+            )
+            self._prepare_retry_input(current_input, violations, attempt)
+            state.retry_count = attempt
+
+        # 5. All attempts exhausted — escalate to MANUAL_REVIEW (Rule 5)
+        logger.error(
+            f"ValidationPipeline | agent={self.agent_kind} EXHAUSTED "
+            f"{self.max_attempts} attempts — escalating to MANUAL_REVIEW"
+        )
+        return self._escalate(state, last_violations)
+
+    # ── helpers ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _prepare_retry_input(
+        agent_input:  dict[str, Any],
+        violations:   list[ConstraintViolation],
+        attempt:      int,
+    ) -> None:
+        """Inject feedback so the next agent call can self-correct."""
+        agent_input["previous_attempt_error"] = {
+            "attempt":     attempt,
+            "violations":  [v.human_message() for v in violations],
+        }
+
+    def _escalate(
+        self,
+        state:       Any,
+        violations:  list[ConstraintViolation],
+    ) -> Any:
+        """Force MANUAL_REVIEW into the agent state and surface the reason."""
+        reason = (
+            f"Validation pipeline exhausted {self.max_attempts} attempts. "
+            f"Final violations: {[v.human_message() for v in violations]}"
+        )
+        escalation: dict[str, Any] = {
+            "decision":     "MANUAL_REVIEW",
+            "status":       "MANUAL_REVIEW",
+            "ai_reasoning": reason,
+            "next_action":  "escalate_to_human",
+            "escalated":    True,
+            "violations":   [v.model_dump() for v in violations],
+        }
+
+        # If we have something usable from the agent, merge with escalation
+        if state is not None and state.result:
+            merged = dict(state.result)
+            merged.update(escalation)
+            state.result = merged
+        else:
+            # Create a minimal state shell if the agent never produced one
+            from agents.reasoning import AgentState  # noqa: WPS433 — lazy import
+            if state is None:
+                state = AgentState(claim_input={})
+            state.result = escalation
+
+        state.last_error = reason
+        state.retry_count = self.max_attempts
+        state.is_done = True
+        if hasattr(state, "log_step"):
+            state.log_step(
+                "escalated",
+                reason=reason,
+                violations=[v.model_dump() for v in violations],
+            )
+        return state
 
 
-def retry_on_constraint_violation(
-    validate_func,
-    agent_func,
-    agent_input: Dict[str, Any],
-    max_attempts: int = 3
-) -> Dict[str, Any]:
-    """Retry agent execution if validation fails.
+# ── module-level convenience wrappers (used by orchestrator wiring) ─
 
-    Args:
-        validate_func: Function to validate output
-        agent_func: Agent function to call
-        agent_input: Input to agent
-        max_attempts: Maximum retry attempts
-
-    Returns:
-        Validated agent output
-
-    Raises:
-        ValidationError: After max_attempts failures
-
-    Note:
-        Implements Rule 5: Self-Healing Validation Pipeline
-        - If output violates a business constraint, feeds error back to agent with clear explanation
-        - Retries maximum 3 attempts
-        - After 3 failures, escalates to MANUAL_REVIEW
-        - All retry attempts logged with timestamps and error descriptions
-    """
-    # TODO: Implement retry logic
-    #
-    # for attempt in range(1, max_attempts + 1):
-    #     try:
-    #         output = agent_func(agent_input)
-    #         result = validate_func(output)
-    #         if result.is_valid:
-    #             return output
-    #         # Feed error back to agent
-    #         agent_input["validation_errors"] = result.violations
-    #         logger.warning(f"Attempt {attempt}: validation failed, retrying...")
-    #     except Exception as e:
-    #         logger.error(f"Attempt {attempt} failed: {e}")
-    #         if attempt == max_attempts:
-    #             raise ValidationError(f"Failed after {max_attempts} attempts")
-    #
-    # raise ValidationError("Validation failed after all retries")
-
-    logger.info(f"Executing agent with max {max_attempts} retry attempts")
-    return agent_func(agent_input)
+async def run_with_validation(
+    agent:               _RunnableAgent,
+    agent_input:         dict[str, Any],
+    validator:           ValidatorFn,
+    agent_kind:          str,
+    max_attempts:        int = 3,
+    **validator_context: Any,
+) -> Any:
+    """Functional shortcut around ValidationPipeline for one-off use."""
+    pipeline = ValidationPipeline(validator, agent_kind, max_attempts)
+    return await pipeline.run(agent, agent_input, **validator_context)
 
 
-def escalate_to_manual_review(
-    claim_id: int,
-    reason: str,
-    agent_type: str,
-    violations: Optional[list[ConstraintViolation]] = None
-) -> Dict[str, Any]:
-    """Escalate claim to manual review after max retries exceeded.
-
-    Args:
-        claim_id: ID of the claim
-        reason: Reason for escalation
-        agent_type: Type of agent that failed
-        violations: List of constraint violations
-
-    Returns:
-        Update payload to set claim_status = MANUAL_REVIEW
-
-    Note:
-        Implements Rule 5 escalation logic:
-        - After 3 failed validation attempts, claim automatically moves to MANUAL_REVIEW
-        - Full audit trail logged with timestamps
-        - Auditor can review the violations and make final decision
-    """
-    # TODO: Implement escalation logic
-    #
-    # escalation_payload = {
-    #     "claim_id": claim_id,
-    #     "claim_status": "MANUAL_REVIEW",
-    #     "ai_reasoning": f"Escalated by {agent_type}: {reason}\nViolations: {violations}",
-    #     "escalated_at": datetime.utcnow(),
-    #     "escalation_reason": reason,
-    # }
-    #
-    # logger.info(f"Escalated claim {claim_id} to MANUAL_REVIEW", extra={
-    #     "claim_id": claim_id,
-    #     "reason": reason,
-    #     "agent_type": agent_type,
-    #     "violations": violations
-    # })
-    #
-    # return escalation_payload
-
-    logger.info(f"Escalating claim {claim_id} to MANUAL_REVIEW: {reason}")
-    return {
-        "claim_id": claim_id,
-        "claim_status": "MANUAL_REVIEW",
-        "reason": reason,
-    }
+__all__ = [
+    "ValidationPipeline",
+    "ValidationError",
+    "ValidationResult",
+    "ConstraintViolation",
+    "run_with_validation",
+]

@@ -26,3 +26,10 @@ pytest-asyncio==0.24.0
 
 # PDF parsing — Documents MCP
 pdfplumber==0.11.4
+
+# LLM + Agent framework — Phase B agents
+langgraph==0.6.10
+langchain==0.3.27
+langchain-anthropic==0.3.21
+langchain-openai==0.3.35
+langchain-ollama==0.3.10
