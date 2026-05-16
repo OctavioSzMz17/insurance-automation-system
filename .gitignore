@@ -86,6 +86,9 @@ kube.local.yaml
 # Alembic
 alembic/versions/*.pyc
 
+# Project documents (local only)
+docs/
+
 # Temp files
 tmp/
 temp/
