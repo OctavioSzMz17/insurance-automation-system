@@ -1,0 +1,51 @@
+# Ruff linter configuration
+# https://docs.astral.sh/ruff/configuration/
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = [
+    "E",    # Pycodestyle errors
+    "W",    # Pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "N",    # pep8-naming
+    "C90",  # mccabe complexity
+    "UP",   # pyupgrade
+    "D",    # pydocstyle
+]
+
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "D100",   # Missing module docstring
+    "D104",   # Missing package docstring
+]
+
+exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "migrations",
+    ".pytest_cache",
+]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]  # unused imports
+"tests/**" = ["D"]  # no docstrings required in tests
+
+[tool.ruff.isort]
+known-first-party = ["ai_orchestrator", "mcp_servers", "observability", "packages", "deployment", "pipelines"]
+known-third-party = ["fastapi", "pydantic", "sqlalchemy", "anthropic"]
+known-typing = ["typing", "typing_extensions"]
+multi_line_mode = 3
+line_length = 100
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+
+[tool.ruff.mccabe]
+max-complexity = 10

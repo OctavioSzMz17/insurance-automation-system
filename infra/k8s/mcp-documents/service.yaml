@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-documents
+  namespace: insurance
+  labels:
+    app: mcp-documents
+spec:
+  type: ClusterIP
+  selector:
+    app: mcp-documents
+  ports:
+  - name: http
+    port: 8005
+    targetPort: http
+    protocol: TCP
+  sessionAffinity: None

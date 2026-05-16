@@ -1,0 +1,51 @@
+# ============================================================
+# Legacy Provider MCP Server — Docker Image (A3.5)
+# Multi-stage build to keep the final image lean.
+#
+# Rules applied:
+#   Rule 7  — Runs as non-root user (uid 1000)
+#   Rule 10 — Every MCP has its own Dockerfile
+#   Rule 12 — Single root requirements.txt, installed in full
+# ============================================================
+
+# ── Stage 1: dependency builder ──────────────────────────────
+FROM python:3.11.9-slim AS builder
+
+WORKDIR /build
+
+# Install build tools needed for psycopg2-binary + pydantic
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+        libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install all dependencies (Rule 12 — root requirements.txt)
+COPY requirements.txt .
+COPY packages/common ./packages/common
+
+RUN pip install --upgrade pip --quiet \
+ && pip install --prefix=/install --no-cache-dir -r requirements.txt --quiet
+
+# ── Stage 2: runtime image ───────────────────────────────────
+FROM python:3.11.9-slim AS runtime
+
+WORKDIR /app
+
+# Copy installed packages from builder
+COPY --from=builder /install /usr/local
+
+# Copy only the source needed by this MCP server
+COPY packages/common        ./packages/common
+COPY mcp-servers/legacy-provider ./mcp-servers/legacy-provider
+
+# Create and switch to non-root user (Rule 7 — security)
+RUN useradd --uid 1000 --no-create-home --shell /bin/false mcp
+USER mcp
+
+# MCP stdio server — no network port needed for stdio transport.
+# SSE transport (production) is enabled via orchestrator proxy.
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app
+
+CMD ["python", "-m", "mcp-servers.legacy-provider.server"]

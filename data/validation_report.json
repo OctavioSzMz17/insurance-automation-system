@@ -1,0 +1,25 @@
+{
+  "status": "VALID",
+  "excel_file": "C:/Users/octav/OneDrive/Escritorio/Real-World Project/Legacy_Insure_Data.xlsx",
+  "timestamp": "2026-05-11T00:00:52.162425+00:00",
+  "total_rows_valid": 10,
+  "total_rows_invalid": 0,
+  "sheets": [
+    {
+      "sheet_name": "Users",
+      "table": "users",
+      "rows_read": 5,
+      "rows_valid": 5,
+      "rows_invalid": 0,
+      "errors": []
+    },
+    {
+      "sheet_name": "Policies",
+      "table": "policies",
+      "rows_read": 5,
+      "rows_valid": 5,
+      "rows_invalid": 0,
+      "errors": []
+    }
+  ]
+}

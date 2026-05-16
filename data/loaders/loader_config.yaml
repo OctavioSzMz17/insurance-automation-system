@@ -1,0 +1,40 @@
+# ============================================================
+# Legacy Excel Loader — Sheet Mapping Configuration
+#
+# This file maps Excel sheet names to database table types.
+# Update ONLY this file when working with a different Excel source.
+# The loader logic never needs to change.
+# ============================================================
+
+# Path to the Excel file (relative to project root or absolute)
+excel_file: "C:/Users/octav/OneDrive/Escritorio/Real-World Project/Legacy_Insure_Data.xlsx"
+
+# Sheet mappings — add, remove, or rename without touching loader code
+sheets:
+
+  users:
+    sheet_name: "Users"               # Actual name in the Excel file
+    required_columns:
+      - user_id
+      - name
+      - email
+    optional_columns: []
+
+  policies:
+    sheet_name: "Policies"            # Actual name in the Excel file
+    required_columns:
+      - policy_id
+      - user_id
+      - type
+      - status
+      - deductible_usd
+      - coverage_limit_usd
+      - start_date
+      - end_date
+    optional_columns: []
+
+  # claims sheet is intentionally absent — claims are created via API, not loaded from Excel
+
+# Output paths
+validation_report_path: "data/validation_report.json"
+load_report_path: "data/load_report.json"

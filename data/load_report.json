@@ -1,0 +1,23 @@
+{
+  "status": "SUCCESS",
+  "timestamp": "2026-05-11T00:30:12.141352+00:00",
+  "total_rows_loaded": 10,
+  "total_rows_failed": 0,
+  "error_message": "",
+  "tables": [
+    {
+      "table": "users",
+      "rows_attempted": 5,
+      "rows_loaded": 5,
+      "rows_failed": 0,
+      "errors": []
+    },
+    {
+      "table": "policies",
+      "rows_attempted": 5,
+      "rows_loaded": 5,
+      "rows_failed": 0,
+      "errors": []
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+# ============================================================
+# Namespace-level resource limits — cost protection
+#
+# LimitRange enforces a hard ceiling on every pod in the
+# insureai namespace. Even if a deployment accidentally sets
+# no limits, Kubernetes will apply these defaults.
+#
+# This prevents runaway auto-scaling from generating
+# unexpected cloud bills.
+# ============================================================
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: insureai-limits
+  namespace: insureai
+spec:
+  limits:
+    - type: Container
+      # Hard ceiling per container — never exceeded
+      max:
+        cpu: "1"         # 1 full core max per container
+        memory: "512Mi"  # 512 MB max per container
+      # Defaults applied when a container sets no limits
+      default:
+        cpu: "500m"
+        memory: "256Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+
+---
+# ============================================================
+# ResourceQuota — hard cap on total resources for the whole
+# namespace. No matter how many pods are created, the sum
+# of all their resources cannot exceed these values.
+# ============================================================
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: insureai-quota
+  namespace: insureai
+spec:
+  hard:
+    pods: "20"                    # Max 20 pods total in the namespace
+    requests.cpu: "2"             # Max 2 cores requested across all pods
+    requests.memory: "1Gi"        # Max 1 GB memory requested
+    limits.cpu: "4"               # Max 4 cores limit across all pods
+    limits.memory: "2Gi"          # Max 2 GB memory limit

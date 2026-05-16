@@ -1,0 +1,156 @@
+name: Deploy (Blue/Green)
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+
+      - name: Build and push Orchestrator
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./infra/docker/Dockerfile.orchestrator
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/orchestrator:${{ github.sha }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/orchestrator:latest
+          cache-to: type=inline
+
+      - name: Build and push MCP Claims
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./infra/docker/Dockerfile.mcp-claims
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/mcp-claims:${{ github.sha }}
+
+      - name: Build and push MCP Policies
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./infra/docker/Dockerfile.mcp-policies
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/mcp-policies:${{ github.sha }}
+
+      - name: Build and push MCP Users
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./infra/docker/Dockerfile.mcp-users
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/mcp-users:${{ github.sha }}
+
+      - name: Build and push MCP Documents
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./infra/docker/Dockerfile.mcp-documents
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/mcp-documents:${{ github.sha }}
+
+  deploy:
+    name: Deploy to Kubernetes (Blue/Green)
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Get current deployment
+        id: current
+        run: |
+          CURRENT=$(kubectl -n insurance get deployment orchestrator-green -o name 2>/dev/null || echo "blue")
+          NEW=$([ "$CURRENT" == "blue" ] && echo "green" || echo "blue")
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "new=$NEW" >> $GITHUB_OUTPUT
+
+      - name: Update image in NEW deployment
+        run: |
+          kubectl -n insurance set image deployment/orchestrator-${{ steps.current.outputs.new }} \
+            orchestrator=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/orchestrator:${{ github.sha }} \
+            --record
+
+      - name: Wait for rollout
+        run: |
+          kubectl -n insurance rollout status deployment/orchestrator-${{ steps.current.outputs.new }} --timeout=5m
+
+      - name: Run smoke tests
+        run: |
+          # Placeholder for smoke tests against the NEW deployment
+          echo "Running smoke tests..."
+
+      - name: Switch traffic to NEW deployment
+        run: |
+          kubectl -n insurance patch service orchestrator -p \
+            '{"spec":{"selector":{"deployment":"orchestrator-${{ steps.current.outputs.new }}"}}}'
+
+      - name: Emit deployment event
+        run: |
+          # Send deployment metric to observability layer
+          echo "Deployment successful: orchestrator-${{ steps.current.outputs.new }} at $(date)"
+
+  rollback:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: failure()
+
+    steps:
+      - name: Configure kubectl
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+
+      - name: Revert to previous deployment
+        run: |
+          kubectl -n insurance patch service orchestrator -p \
+            '{"spec":{"selector":{"deployment":"orchestrator-blue"}}}'
+
+      - name: Alert on rollback
+        run: |
+          echo "⚠️  Rollback executed. Check logs for failure details."
