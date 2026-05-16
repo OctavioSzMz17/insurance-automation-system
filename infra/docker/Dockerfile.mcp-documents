@@ -1,32 +1,56 @@
-# Document Extraction MCP Server Dockerfile
+# ============================================================
+# Documents MCP Server — Docker Image (B1.4)
+# Multi-stage build to keep the final image lean.
+#
+# Rules applied:
+#   Rule 7  — Runs as non-root user (uid 1000)
+#   Rule 10 — Every MCP has its own Dockerfile
+#   Rule 12 — Single root requirements.txt, installed in full
+# ============================================================
 
-FROM python:3.11-slim
+# ── Stage 1: dependency builder ──────────────────────────────
+FROM python:3.11.9-slim AS builder
+
+WORKDIR /build
+
+# Install build tools needed for pdfplumber + Pillow + pydantic
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+        libjpeg-dev \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install all dependencies (Rule 12 — root requirements.txt)
+COPY requirements.txt .
+COPY packages/common ./packages/common
+
+RUN pip install --upgrade pip --quiet \
+ && pip install --prefix=/install --no-cache-dir -r requirements.txt --quiet
+
+# ── Stage 2: runtime image ───────────────────────────────────
+FROM python:3.11.9-slim AS runtime
 
 WORKDIR /app
 
-# Install system dependencies for PDF processing and OCR
-RUN apt-get update && apt-get install -y \
-    poppler-utils \
-    tesseract-ocr \
-    libpq-dev \
+# Runtime libs needed by Pillow / pdfplumber for PDF rasterisation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libjpeg62-turbo \
+        zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy root requirements
-COPY requirements.txt .
+# Copy installed packages from builder
+COPY --from=builder /install /usr/local
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy only the source needed by this MCP server
+COPY packages/common         ./packages/common
+COPY mcp-servers/documents   ./mcp-servers/documents
 
-# Copy entire project (monorepo)
-COPY . .
+# Create and switch to non-root user (Rule 7 — security)
+RUN useradd --uid 1000 --no-create-home --shell /bin/false mcp
+USER mcp
 
-# Create non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
-USER appuser
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8005/health')" || exit 1
-
-# Run MCP server
-CMD ["python", "-m", "mcp_servers.documents.server"]
+CMD ["python", "mcp-servers/documents/server.py"]

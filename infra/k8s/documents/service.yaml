@@ -1,0 +1,27 @@
+# ============================================================
+# Documents MCP Server — Kubernetes Service (B1.4)
+#
+# ClusterIP only — internal to the cluster.
+# The orchestrator reaches this service over SSE; it is never
+# exposed to the public internet.
+#
+# Rules applied:
+#   Rule 7  — MCP ↔ orchestrator via SSE; no external exposure
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-documents
+  namespace: insureai
+  labels:
+    app: mcp-documents
+    domain: documents
+spec:
+  type: ClusterIP        # Internal only — not reachable from outside the cluster
+  selector:
+    app: mcp-documents
+  ports:
+    - name: sse
+      protocol: TCP
+      port: 8002         # Distinct from legacy-provider's 8001
+      targetPort: 8002   # Port the container listens on (SSE transport)

@@ -290,9 +290,11 @@ def _safe_date(value: Any, field_name: str) -> date:
     Raises:
         ValueError: If conversion fails.
     """
+    if isinstance(value, datetime):  # datetime subclasses date — check it first
+        return value.date()
     if isinstance(value, date):
         return value
-    if hasattr(value, "date"):
+    if hasattr(value, "date") and callable(value.date):
         return value.date()
     try:
         return datetime.strptime(str(value), "%Y-%m-%d").date()

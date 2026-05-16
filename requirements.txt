@@ -19,3 +19,10 @@ pydantic==2.11.4
 
 # MCP SDK — Model Context Protocol server framework
 mcp==1.9.4
+
+# Testing
+pytest==8.3.5
+pytest-asyncio==0.24.0
+
+# PDF parsing — Documents MCP
+pdfplumber==0.11.4

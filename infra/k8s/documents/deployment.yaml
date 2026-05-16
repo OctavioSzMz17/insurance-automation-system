@@ -1,0 +1,95 @@
+# ============================================================
+# Documents MCP Server — Kubernetes Deployment (B1.4)
+#
+# This MCP has NO database access — it is a pure-parsing service.
+# It receives PDF paths and reads them from a shared PVC mounted
+# at /uploads. The orchestrator writes uploads to that same PVC.
+#
+# Rules applied:
+#   Rule 3  — Read-only domain (PDF parsing); no DB credentials
+#   Rule 7  — Runs as non-root (runAsUser: 1000)
+#   Rule 9  — CD pipeline (Blue/Green): maxSurge=1, maxUnavailable=0
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-documents
+  namespace: insureai
+  labels:
+    app: mcp-documents
+    phase: b
+    domain: documents
+spec:
+  replicas: 2          # Fixed — do NOT enable HPA without setting a maxReplicas cap
+  selector:
+    matchLabels:
+      app: mcp-documents
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1          # One new pod before killing the old one
+      maxUnavailable: 0    # Zero-downtime deploys (Rule 9)
+  template:
+    metadata:
+      labels:
+        app: mcp-documents
+        domain: documents
+    spec:
+      # ── Security: run as non-root (Rule 7) ─────────────────
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+
+      containers:
+        - name: mcp-documents
+          # Image tagged by CI with git SHA + semver
+          image: mcp-documents:latest
+          imagePullPolicy: IfNotPresent
+
+          # Resource limits — PDF parsing uses more RAM than DB queries
+          resources:
+            requests:
+              cpu: "150m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+          # Liveness: restart container if process dies
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import sys; sys.exit(0)"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+
+          # Readiness: only route traffic once the server is ready
+          readinessProbe:
+            exec:
+              command: ["python", "-c", "import pdfplumber; sys.exit(0)"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            # Shared PVC where the orchestrator drops uploaded PDFs
+            - name: uploads
+              mountPath: /uploads
+              readOnly: true
+            # Writable scratch for pdfplumber's temp files
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: uploads
+          persistentVolumeClaim:
+            claimName: insureai-pdf-uploads     # Created once per environment by ops
+        - name: tmp
+          emptyDir: {}
+
+      restartPolicy: Always

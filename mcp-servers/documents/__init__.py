@@ -1,7 +1,10 @@
-"""Document Extraction MCP Server.
+"""Documents MCP Server package.
 
-Dedicated MCP for extracting data and information from PDF files.
-Implements Rule 3: MCP Domain Boundaries - each MCP owns exactly one domain.
+Exposes PDF extraction tools for parsing claim reports into structured
+data that AI agents can reason over.
+
+Domain: documents (read-only — pure parsing, no DB writes)
+Tools:  extract_claim_from_pdf
 """
 
 __version__ = "0.1.0"
