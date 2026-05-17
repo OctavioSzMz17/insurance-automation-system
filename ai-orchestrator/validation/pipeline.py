@@ -23,6 +23,7 @@ Rules applied:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Protocol
@@ -56,13 +57,27 @@ class ValidationPipeline:
         self,
         validator:    ValidatorFn,
         agent_kind:   str,
-        max_attempts: int = 3,
+        max_attempts: int   = 3,
+        base_delay_s: float = 1.0,
     ) -> None:
+        """
+        Args:
+            validator:     Callable producing list[ConstraintViolation].
+            agent_kind:    Tag for logging + escalation reasons.
+            max_attempts:  3 per Rule 5 by default.
+            base_delay_s:  Exponential backoff base. Sleep on retry =
+                           base_delay_s * 2 ** (attempt - 1). Default 1s
+                           → waits of 1s, 2s, 4s. Set to 0 to disable
+                           (useful for unit tests).
+        """
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
+        if base_delay_s < 0:
+            raise ValueError("base_delay_s must be >= 0")
         self.validator    = validator
         self.agent_kind   = agent_kind
         self.max_attempts = max_attempts
+        self.base_delay_s = base_delay_s
 
     # ── public entry point ────────────────────────────────────────
 
@@ -103,6 +118,7 @@ class ValidationPipeline:
                 )]
                 logger.error(f"Agent raised on attempt {attempt}: {e}")
                 self._prepare_retry_input(current_input, last_violations, attempt)
+                await self._backoff_before_retry(attempt)
                 continue
 
             # 2. Did the agent itself fail (state.last_error set, no result)?
@@ -117,6 +133,7 @@ class ValidationPipeline:
                     f"Agent had no usable result on attempt {attempt}: {state.last_error}"
                 )
                 self._prepare_retry_input(current_input, last_violations, attempt)
+                await self._backoff_before_retry(attempt)
                 continue
 
             # 3. Validate the agent's output
@@ -150,6 +167,7 @@ class ValidationPipeline:
             )
             self._prepare_retry_input(current_input, violations, attempt)
             state.retry_count = attempt
+            await self._backoff_before_retry(attempt)
 
         # 5. All attempts exhausted — escalate to MANUAL_REVIEW (Rule 5)
         logger.error(
@@ -159,6 +177,21 @@ class ValidationPipeline:
         return self._escalate(state, last_violations)
 
     # ── helpers ───────────────────────────────────────────────────
+
+    async def _backoff_before_retry(self, attempt: int) -> None:
+        """Sleep before the next attempt — exponential, capped.
+
+        Skips the sleep on the FINAL attempt (no next try anyway), and
+        when base_delay_s is 0 (test mode).
+        """
+        if self.base_delay_s == 0 or attempt >= self.max_attempts:
+            return
+        delay = self.base_delay_s * (2 ** (attempt - 1))
+        logger.info(
+            f"ValidationPipeline backoff | agent={self.agent_kind} "
+            f"after_attempt={attempt} sleeping={delay:.2f}s"
+        )
+        await asyncio.sleep(delay)
 
     @staticmethod
     def _prepare_retry_input(

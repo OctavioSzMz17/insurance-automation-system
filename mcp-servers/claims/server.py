@@ -34,7 +34,9 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 import mcp.types as types
 
-from tools.create_claim import create_claim
+from tools.create_claim        import create_claim
+from tools.get_claim_by_id     import get_claim_by_id
+from tools.update_claim_status import update_claim_status
 
 # ------------------------------------------------------------------ #
 # Logging (stderr keeps stdout clean for MCP protocol)               #
@@ -53,6 +55,41 @@ logger = logging.getLogger(__name__)
 server: Server = Server("claims")
 
 TOOLS: list[types.Tool] = [
+    types.Tool(
+        name="get_claim_by_id",
+        description=(
+            "Fetch a single claim record by its integer claim_id. "
+            "Read-only; returns every column from the claims row."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "claim_id": {
+                    "type": "integer",
+                    "description": "Primary key of the claim to retrieve.",
+                }
+            },
+            "required": ["claim_id"],
+        },
+    ),
+    types.Tool(
+        name="update_claim_status",
+        description=(
+            "Manually move a claim from MANUAL_REVIEW/AWAITING_INPUT to "
+            "APPROVED or REJECTED. WRITE-RESTRICTED. Appends an audit "
+            "line to ai_reasoning."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "claim_id":   {"type": "integer"},
+                "new_status": {"type": "string", "enum": ["APPROVED", "REJECTED"]},
+                "actor":      {"type": "string"},
+                "note":       {"type": "string"},
+            },
+            "required": ["claim_id", "new_status", "actor", "note"],
+        },
+    ),
     types.Tool(
         name="create_claim",
         description=(
@@ -98,6 +135,15 @@ async def handle_call_tool(
     try:
         if name == "create_claim":
             result = await create_claim(arguments)
+        elif name == "get_claim_by_id":
+            result = await get_claim_by_id(int(arguments["claim_id"]))
+        elif name == "update_claim_status":
+            result = await update_claim_status(
+                claim_id=int(arguments["claim_id"]),
+                new_status=str(arguments["new_status"]),
+                actor=str(arguments["actor"]),
+                note=str(arguments["note"]),
+            )
         else:
             raise ValueError(f"Unknown tool: '{name}'")
         return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, default=str))]

@@ -33,3 +33,11 @@ langchain==0.3.27
 langchain-anthropic==0.3.21
 langchain-openai==0.3.35
 langchain-ollama==0.3.10
+
+# FastAPI orchestrator — Phase C
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic-settings==2.7.1
+python-multipart==0.0.20
+httpx==0.28.1
+python-jose[cryptography]==3.3.0

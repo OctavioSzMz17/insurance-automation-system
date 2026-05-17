@@ -1,0 +1,90 @@
+"""FastAPI dependencies that enforce JWT auth + role-based access (Rule 7).
+
+Usage in a route:
+
+    from auth import require_role, Role
+
+    @router.post("/claims/{id}/approve")
+    async def approve(..., user = Depends(require_role(Role.AUDITOR))):
+        # `user` is a UserPrincipal — guaranteed valid + role-checked
+        ...
+
+If the request is missing a token → 401.
+If the token is bad / expired      → 401.
+If the role is too low             → 403.
+"""
+
+from __future__ import annotations
+
+from typing import Callable
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from .jwt   import decode_jwt
+from .roles import Role, UserPrincipal, has_role_or_higher
+
+
+# HTTPBearer auto-extracts the token from "Authorization: Bearer <token>".
+# auto_error=True → missing header returns 403 by default; we override to 401
+# inside the dependency so the error semantics match RFC 6750.
+_bearer = HTTPBearer(auto_error=False)
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> UserPrincipal:
+    """Resolve the request's authenticated user from its bearer token."""
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Authorization: Bearer <token> header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    payload = decode_jwt(credentials.credentials)
+    sub      = payload.get("sub")
+    role_str = payload.get("role")
+    if not sub or not role_str:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token missing required claims (sub / role)",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        role = Role(role_str)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Unknown role in token: {role_str!r}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return UserPrincipal(sub=sub, role=role)
+
+
+def require_role(min_role: Role) -> Callable[..., UserPrincipal]:
+    """Factory: returns a FastAPI dependency that enforces `min_role`.
+
+    Args:
+        min_role: Minimum tier required to access the endpoint.
+
+    Returns:
+        An async dependency function for use with Depends().
+    """
+
+    async def _checker(
+        user: UserPrincipal = Depends(get_current_user),
+    ) -> UserPrincipal:
+        if not has_role_or_higher(user.role, min_role):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Role {user.role.value!r} cannot access this endpoint "
+                    f"(requires {min_role.value!r} or higher)"
+                ),
+            )
+        return user
+
+    return _checker

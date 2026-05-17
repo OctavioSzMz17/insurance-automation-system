@@ -1,0 +1,81 @@
+# ============================================================
+# AI Orchestrator (FastAPI) — Docker Image (C3.1)
+# Multi-stage build to keep the final image lean.
+#
+# Build:
+#   docker build -f infra/docker/Dockerfile.orchestrator -t insureai-orchestrator:dev .
+#
+# Run (with .env in project root):
+#   docker run --rm -p 8000:8000 --env-file .env insureai-orchestrator:dev
+#
+# Rules applied:
+#   Rule 7  — Runs as non-root user (uid 1000)
+#   Rule 10 — Orchestrator has its own Dockerfile
+#   Rule 12 — Single root requirements.txt, installed in full
+# ============================================================
+
+# ── Stage 1: dependency builder ──────────────────────────────
+FROM python:3.11.9-slim AS builder
+
+WORKDIR /build
+
+# Build deps for pdfplumber (Pillow), psycopg2, etc.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+        libpq-dev \
+        libjpeg-dev \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install all Python deps via the root requirements.txt (Rule 12).
+COPY requirements.txt .
+COPY packages/common ./packages/common
+
+RUN pip install --upgrade pip --quiet \
+ && pip install --prefix=/install --no-cache-dir -r requirements.txt --quiet
+
+# ── Stage 2: runtime image ───────────────────────────────────
+FROM python:3.11.9-slim AS runtime
+
+WORKDIR /app
+
+# Runtime libs needed by Pillow / pdfplumber / psycopg2
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpq5 \
+        libjpeg62-turbo \
+        zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+# Bring the prebuilt Python packages over
+COPY --from=builder /install /usr/local
+
+# Copy the application source.
+# We include the MCP source directories because the orchestrator
+# imports their tool functions in-process via core/tools/_loader.py
+# (Phase B+C). Once we switch to SSE clients (later), this can shrink.
+COPY packages/common              ./packages/common
+COPY mcp-servers/legacy-provider  ./mcp-servers/legacy-provider
+COPY mcp-servers/documents        ./mcp-servers/documents
+COPY mcp-servers/claims           ./mcp-servers/claims
+COPY ai-orchestrator              ./ai-orchestrator
+
+# Create and switch to non-root user (Rule 7)
+RUN useradd --uid 1000 --no-create-home --shell /bin/false orchestrator
+USER orchestrator
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app:/app/ai-orchestrator
+
+EXPOSE 8000
+
+# Container-friendly healthcheck — uses /health endpoint.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD python -c "import urllib.request,sys; \
+                 r = urllib.request.urlopen('http://localhost:8000/health', timeout=3); \
+                 sys.exit(0 if r.status == 200 else 1)" || exit 1
+
+CMD ["python", "-m", "uvicorn", "app:app", \
+     "--app-dir", "/app/ai-orchestrator", \
+     "--host", "0.0.0.0", \
+     "--port", "8000"]

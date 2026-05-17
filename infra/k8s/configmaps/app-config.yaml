@@ -1,0 +1,45 @@
+# ============================================================
+# ConfigMap — non-secret application configuration (C3.2)
+#
+# Mounted as env vars by every service in the namespace. Secrets
+# (DATABASE_URL, JWT_SECRET_KEY, LLM_PROVIDER_API_KEY) live in the
+# `insureai-secrets` Secret — never put credentials here.
+#
+# Apply:  kubectl apply -f infra/k8s/configmaps/app-config.yaml
+# Edit:   kubectl edit configmap insureai-app-config -n insureai
+# ============================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: insureai-app-config
+  namespace: insureai
+  labels:
+    app: insureai
+data:
+  # ── Environment ──────────────────────────────────────────
+  ENVIRONMENT:       "production"
+  LOG_LEVEL:         "INFO"
+
+  # ── API (orchestrator) ───────────────────────────────────
+  API_HOST:          "0.0.0.0"
+  API_PORT:          "8000"
+
+  # ── JWT ──────────────────────────────────────────────────
+  # The signing key is in the Secret, not here.
+  JWT_ALGORITHM:        "HS256"
+  JWT_EXPIRATION_HOURS: "24"
+
+  # ── LLM provider selection ───────────────────────────────
+  # Switching providers = `kubectl edit configmap …` + rollout.
+  LLM_PROVIDER:      "claude"
+  MODEL_NAME:        "claude-sonnet-4-5"
+  LLM_TEMPERATURE:   "0.2"
+  LLM_MAX_TOKENS:    "2000"
+
+  # ── Optional local fallback (typically empty in prod) ───
+  LLM_LOCAL_PROVIDER:   ""
+  LLM_LOCAL_MODEL_NAME: ""
+  OLLAMA_BASE_URL:      "http://localhost:11434"
+
+  # ── Pipeline tuning ──────────────────────────────────────
+  MAX_RETRY_ATTEMPTS:   "3"

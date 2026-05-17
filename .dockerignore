@@ -1,0 +1,61 @@
+# ── VCS ──────────────────────────────────────────────────────
+.git
+.gitignore
+.gitattributes
+.github
+
+# ── Local environment ───────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Python ───────────────────────────────────────────────────
+__pycache__
+*.py[cod]
+*$py.class
+*.egg-info
+.eggs
+build
+dist
+.venv
+venv
+env
+ENV
+
+# ── Tests / coverage / type-cache ───────────────────────────
+.pytest_cache
+.mypy_cache
+.coverage
+.coverage.*
+htmlcov
+.tox
+
+# ── IDE / editor ────────────────────────────────────────────
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+
+# ── Project artifacts that should never be baked into images ─
+docs
+scripts
+*.md
+!packages/common/README.md
+data/validation_report.json
+data/load_report.json
+data/loaders/tests
+ai-orchestrator/tests
+mcp-servers/*/tests
+node_modules
+
+# ── Docker / K8s manifests aren't needed inside the image ───
+infra/k8s
+infra/docker/*.yml
+infra/docker/README.md
+
+# ── Misc ─────────────────────────────────────────────────────
+*.log
+*.tmp
+*.pid
+.python-version

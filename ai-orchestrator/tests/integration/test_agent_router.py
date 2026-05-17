@@ -107,8 +107,8 @@ def _build_router(analyst: MagicMock, auditor: MagicMock) -> AgentRouter:
     return AgentRouter(
         analyst=analyst,
         auditor=auditor,
-        analyst_pipeline=ValidationPipeline(validate_triage_report, "analyst", max_attempts=3),
-        auditor_pipeline=ValidationPipeline(validate_claim_decision, "auditor", max_attempts=3),
+        analyst_pipeline=ValidationPipeline(validate_triage_report, "analyst", max_attempts=3, base_delay_s=0),
+        auditor_pipeline=ValidationPipeline(validate_claim_decision, "auditor", max_attempts=3, base_delay_s=0),
     )
 
 
@@ -263,8 +263,8 @@ class TestConstructorInjection:
         router = AgentRouter(
             analyst=analyst,
             auditor=auditor,
-            analyst_pipeline=ValidationPipeline(validate_triage_report, "analyst", max_attempts=2),
-            auditor_pipeline=ValidationPipeline(validate_claim_decision, "auditor", max_attempts=3),
+            analyst_pipeline=ValidationPipeline(validate_triage_report, "analyst", max_attempts=2, base_delay_s=0),
+            auditor_pipeline=ValidationPipeline(validate_claim_decision, "auditor", max_attempts=3, base_delay_s=0),
         )
 
         await router.process_claim("test.pdf")

@@ -69,8 +69,8 @@ node_modules/
 npm-debug.log
 yarn-error.log
 
-# Docker
-*.dockerignore
+# Docker — keep .dockerignore tracked; only ignore per-service overrides
+# (none committed today; the rule was here from the initial scaffold).
 
 # Kubernetes
 kube.local.yaml

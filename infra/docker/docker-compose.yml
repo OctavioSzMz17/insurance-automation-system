@@ -1,0 +1,94 @@
+# ============================================================
+# Docker Compose — Local Dev Environment (C3.1)
+#
+# Default (talks to Neon — your .env DATABASE_URL):
+#     docker compose -f infra/docker/docker-compose.yml up --build
+#
+# With local Postgres (offline / no Neon access):
+#     docker compose -f infra/docker/docker-compose.yml \
+#         --profile local-db up --build
+#     # Then in .env temporarily:
+#     # DATABASE_URL=postgresql://insureai:dev@postgres:5432/insureai
+#
+# Stop everything:
+#     docker compose -f infra/docker/docker-compose.yml down
+#
+# All env vars come from the project root .env (gitignored, Rule 8).
+# ============================================================
+
+services:
+  # ── Orchestrator (FastAPI) ──────────────────────────────────
+  orchestrator:
+    build:
+      context: ../..                      # project root
+      dockerfile: infra/docker/Dockerfile.orchestrator
+    image: insureai-orchestrator:dev
+    container_name: insureai-orchestrator
+    env_file:
+      - ../../.env                         # reads project-root .env
+    environment:
+      # Always bind to the container's 0.0.0.0 regardless of host setting
+      API_HOST: "0.0.0.0"
+      API_PORT: "8000"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    networks:
+      - insureai
+    # If you start the local-db profile, wait for Postgres to be healthy
+    # before booting the orchestrator. Harmless when local-db is off.
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+
+  # ── Optional local Postgres (enable via --profile local-db) ─
+  postgres:
+    image: postgres:16-alpine
+    container_name: insureai-postgres
+    profiles: ["local-db"]
+    environment:
+      POSTGRES_USER:     insureai
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB:       insureai
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U insureai -d insureai"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - insureai
+
+  # ── One-shot Alembic migration runner (local-db profile) ────
+  migrations:
+    profiles: ["local-db"]
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.orchestrator
+    image: insureai-orchestrator:dev
+    container_name: insureai-migrations
+    env_file:
+      - ../../.env
+    environment:
+      DATABASE_URL: "postgresql://insureai:dev@postgres:5432/insureai"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+    working_dir: /app
+    networks:
+      - insureai
+    restart: "no"
+
+# ── Networks + volumes ──────────────────────────────────────
+networks:
+  insureai:
+    name: insureai-dev
+
+volumes:
+  pgdata:
+    name: insureai-pgdata

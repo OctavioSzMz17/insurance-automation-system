@@ -138,7 +138,7 @@ class TestPassesOnFirstAttempt:
     @pytest.mark.asyncio
     async def test_analyst_good_output_no_retries(self) -> None:
         agent = _mock_agent([_good_triage()])
-        pipeline = ValidationPipeline(validate_triage_report, "analyst", max_attempts=3)
+        pipeline = ValidationPipeline(validate_triage_report, "analyst", max_attempts=3, base_delay_s=0)
 
         state = await pipeline.run(agent, {"pdf_path": "test.pdf"})
 
@@ -151,7 +151,7 @@ class TestPassesOnFirstAttempt:
     @pytest.mark.asyncio
     async def test_auditor_good_output_no_retries(self) -> None:
         agent = _mock_agent([_good_decision()], role="READ+WRITE")
-        pipeline = ValidationPipeline(validate_claim_decision, "auditor", max_attempts=3)
+        pipeline = ValidationPipeline(validate_claim_decision, "auditor", max_attempts=3, base_delay_s=0)
 
         state = await pipeline.run(
             agent,
@@ -170,7 +170,7 @@ class TestRecoveryOnRetry:
     @pytest.mark.asyncio
     async def test_bad_then_good_succeeds(self) -> None:
         agent = _mock_agent([_bad_triage_missing_claim(), _good_triage()])
-        pipeline = ValidationPipeline(validate_triage_report, "analyst", max_attempts=3)
+        pipeline = ValidationPipeline(validate_triage_report, "analyst", max_attempts=3, base_delay_s=0)
 
         state = await pipeline.run(agent, {"pdf_path": "test.pdf"})
 
@@ -182,7 +182,7 @@ class TestRecoveryOnRetry:
     async def test_retry_input_includes_previous_attempt_error(self) -> None:
         """The pipeline must feed validation feedback back to the agent."""
         agent = _mock_agent([_bad_triage_missing_claim(), _good_triage()])
-        pipeline = ValidationPipeline(validate_triage_report, "analyst", max_attempts=3)
+        pipeline = ValidationPipeline(validate_triage_report, "analyst", max_attempts=3, base_delay_s=0)
 
         await pipeline.run(agent, {"pdf_path": "test.pdf"})
 
@@ -201,7 +201,7 @@ class TestEscalationAfterMaxAttempts:
     @pytest.mark.asyncio
     async def test_always_bad_escalates_to_manual_review(self) -> None:
         agent = _mock_agent([_bad_triage_missing_claim()] * 5)  # always bad
-        pipeline = ValidationPipeline(validate_triage_report, "analyst", max_attempts=3)
+        pipeline = ValidationPipeline(validate_triage_report, "analyst", max_attempts=3, base_delay_s=0)
 
         state = await pipeline.run(agent, {"pdf_path": "test.pdf"})
 
@@ -216,7 +216,7 @@ class TestEscalationAfterMaxAttempts:
     @pytest.mark.asyncio
     async def test_auditor_exhausted_forces_manual_review_decision(self) -> None:
         agent = _mock_agent([_bad_decision_short_reasoning()] * 5, role="READ+WRITE")
-        pipeline = ValidationPipeline(validate_claim_decision, "auditor", max_attempts=3)
+        pipeline = ValidationPipeline(validate_claim_decision, "auditor", max_attempts=3, base_delay_s=0)
 
         state = await pipeline.run(
             agent,
@@ -236,7 +236,7 @@ class TestAgentExceptionHandling:
     async def test_agent_exception_triggers_retry(self) -> None:
         """If the agent itself raises, that counts as a violation."""
         agent = _mock_agent([RuntimeError("LLM timeout"), _good_triage()])
-        pipeline = ValidationPipeline(validate_triage_report, "analyst", max_attempts=3)
+        pipeline = ValidationPipeline(validate_triage_report, "analyst", max_attempts=3, base_delay_s=0)
 
         state = await pipeline.run(agent, {"pdf_path": "test.pdf"})
 
@@ -246,7 +246,7 @@ class TestAgentExceptionHandling:
     @pytest.mark.asyncio
     async def test_repeated_exceptions_escalate(self) -> None:
         agent = _mock_agent([RuntimeError("always fails")] * 5)
-        pipeline = ValidationPipeline(validate_triage_report, "analyst", max_attempts=3)
+        pipeline = ValidationPipeline(validate_triage_report, "analyst", max_attempts=3, base_delay_s=0)
 
         state = await pipeline.run(agent, {"pdf_path": "test.pdf"})
 
@@ -265,7 +265,7 @@ class TestBoundaryConditions:
             _bad_triage_missing_claim(),
             _good_triage(),
         ])
-        pipeline = ValidationPipeline(validate_triage_report, "analyst", max_attempts=3)
+        pipeline = ValidationPipeline(validate_triage_report, "analyst", max_attempts=3, base_delay_s=0)
 
         state = await pipeline.run(agent, {"pdf_path": "test.pdf"})
 
@@ -276,4 +276,4 @@ class TestBoundaryConditions:
 
     def test_invalid_max_attempts_raises(self) -> None:
         with pytest.raises(ValueError, match="max_attempts"):
-            ValidationPipeline(validate_triage_report, "analyst", max_attempts=0)
+            ValidationPipeline(validate_triage_report, "analyst", max_attempts=0, base_delay_s=0)

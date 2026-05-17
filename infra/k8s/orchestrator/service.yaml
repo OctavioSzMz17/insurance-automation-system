@@ -1,0 +1,27 @@
+# ============================================================
+# AI Orchestrator — Kubernetes Service (C3.2)
+#
+# This is the ONLY publicly-reachable Service in the namespace.
+# Defaults to ClusterIP — exposure to the internet is done by an
+# Ingress / LoadBalancer above this (cluster-specific).
+#
+# Switch `type: ClusterIP` → `type: LoadBalancer` only for cloud-
+# managed clusters when you DO want a public IP directly.
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator
+  namespace: insureai
+  labels:
+    app: orchestrator
+    layer: api
+spec:
+  type: ClusterIP
+  selector:
+    app: orchestrator
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: http        # named port from the deployment (8000)

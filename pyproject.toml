@@ -73,6 +73,7 @@ markers = [
     "integration: integration tests",
     "slow: slow tests",
     "asyncio: async tests",
+    "e2e: end-to-end tests (real LLM calls + real DB; opt-in via RUN_E2E=1)",
 ]
 
 [tool.coverage.run]
