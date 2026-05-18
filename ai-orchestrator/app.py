@@ -48,6 +48,7 @@ from routes.mcp_router   import MCPRouter             # noqa: E402
 from routes import health as health_routes            # noqa: E402
 from routes import claims as claims_routes            # noqa: E402
 from routes import auth   as auth_routes              # noqa: E402
+from routes import users  as users_routes             # noqa: E402
 
 
 # ── Logging (will move to observability layer in a future task) ───
@@ -115,6 +116,7 @@ app.add_middleware(
 app.include_router(health_routes.router)
 app.include_router(auth_routes.router)
 app.include_router(claims_routes.router)
+app.include_router(users_routes.router)
 
 
 # Convenience root

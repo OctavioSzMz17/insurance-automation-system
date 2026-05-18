@@ -88,6 +88,50 @@ class ClaimStatusResponse(BaseModel):
     updated_at:             Optional[str] = None
 
 
+# ── GET /claims (list) ───────────────────────────────────────────
+
+class ClaimListResponse(BaseModel):
+    """Response from GET /claims — paginated list of claim rows."""
+    claims: list[ClaimStatusResponse]
+    total:  int
+    limit:  int
+    offset: int
+
+
+# ── GET /users/{id} ──────────────────────────────────────────────
+
+class UserResponse(BaseModel):
+    """Public user profile — wraps legacy-provider's get_user_by_id."""
+    user_id: int
+    name:    str
+    email:   str
+
+
+# ── GET /users/{id}/policies ─────────────────────────────────────
+
+class PolicyResponse(BaseModel):
+    """Single policy row — wraps legacy-provider's policy dict.
+
+    Monetary fields are strings (Rule 2 — never round Decimals via float)
+    and dates are ISO-8601 strings.
+    """
+    policy_id:          int
+    user_id:            int
+    type:               str
+    status:             str
+    deductible_usd:     str
+    coverage_limit_usd: str
+    start_date:         str
+    end_date:           str
+
+
+class PolicyListResponse(BaseModel):
+    """Response from GET /users/{id}/policies."""
+    user_id:  int
+    policies: list[PolicyResponse]
+    total:    int
+
+
 # ── Health & Readiness ───────────────────────────────────────────
 
 class HealthResponse(BaseModel):

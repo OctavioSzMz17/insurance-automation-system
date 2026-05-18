@@ -126,6 +126,11 @@ class MCPRouter:
             write_restricted=False,
         ))
         self.register(ToolInfo(
+            "claims", "list_claims",
+            load_mcp_tool("claims", "list_claims"),
+            write_restricted=False,
+        ))
+        self.register(ToolInfo(
             "claims", "create_claim",
             load_mcp_tool("claims", "create_claim"),
             write_restricted=True,

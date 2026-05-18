@@ -1,0 +1,150 @@
+"""User & policy lookup endpoints — Phase C (Adjuster Dashboard).
+
+Endpoints:
+    GET /users/{user_id}          — analyst+ — user profile lookup
+    GET /users/{user_id}/policies — analyst+ — all policies for a user
+
+These exist so the adjuster UI can verify Lía's reasoning against the
+real underlying data (e.g. when Lía claims "incident date is after the
+policy end date", the human needs to see the policy dates).
+
+Both endpoints are read-only wrappers around the legacy-provider MCP
+tools (`get_user_by_id`, `get_policies_by_user_id`). They are gated by
+JWT bearer auth + role check (Rule 7).
+
+Rules applied:
+    Rule 1  — Pydantic schemas imported from packages/common/
+    Rule 3  — Reads only; never proxies a write through legacy-provider
+    Rule 7  — Every endpoint Depends(require_role(...))
+    Rule 9  — Structured logging on every request
+    Rule 11 — Type hints throughout
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException, status
+
+_ORCH_ROOT    = Path(__file__).resolve().parents[1]
+_PROJECT_ROOT = _ORCH_ROOT.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
+sys.path.insert(0, str(_ORCH_ROOT))
+
+from packages.common.schemas.api import (  # noqa: E402
+    UserResponse,
+    PolicyResponse,
+    PolicyListResponse,
+)
+
+from auth                  import Role, UserPrincipal, require_role  # noqa: E402
+from routes.mcp_router      import MCPRouter, get_mcp_router          # noqa: E402
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/users", tags=["users"])
+
+
+# ── GET /users/{user_id} ─────────────────────────────────────────
+
+@router.get(
+    "/{user_id}",
+    response_model=UserResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get a user profile",
+    description=(
+        "Read-only lookup of a single user by ID. Returned data is the "
+        "minimum the adjuster UI needs to verify the AI's reasoning."
+    ),
+    responses={
+        401: {"description": "Missing or invalid token"},
+        403: {"description": "Insufficient role"},
+        404: {"description": "User not found"},
+        500: {"description": "Upstream lookup failed"},
+    },
+)
+async def get_user(
+    user_id:    int,
+    user:       UserPrincipal = Depends(require_role(Role.ANALYST)),
+    mcp_router: MCPRouter     = Depends(get_mcp_router),
+) -> UserResponse:
+    logger.info(
+        f"GET /users/{user_id} | actor={user.sub} role={user.role.value}"
+    )
+
+    try:
+        row = await mcp_router.call(
+            "legacy-provider", "get_user_by_id",
+            caller_role=user.role,
+            user_id=user_id,
+        )
+    except ValueError as e:
+        logger.warning(f"GET /users/{user_id} not found: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found",
+        )
+    except Exception as e:
+        logger.error(f"GET /users/{user_id} upstream error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal error retrieving user",
+        )
+
+    return UserResponse(**row)
+
+
+# ── GET /users/{user_id}/policies ────────────────────────────────
+
+@router.get(
+    "/{user_id}/policies",
+    response_model=PolicyListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List policies for a user",
+    description=(
+        "Returns every policy attached to a given user. The adjuster UI "
+        "uses this to pick out the policy linked to the current claim "
+        "and verify the AI's coverage analysis."
+    ),
+    responses={
+        401: {"description": "Missing or invalid token"},
+        403: {"description": "Insufficient role"},
+        404: {"description": "User not found"},
+        500: {"description": "Upstream lookup failed"},
+    },
+)
+async def get_user_policies(
+    user_id:    int,
+    user:       UserPrincipal = Depends(require_role(Role.ANALYST)),
+    mcp_router: MCPRouter     = Depends(get_mcp_router),
+) -> PolicyListResponse:
+    logger.info(
+        f"GET /users/{user_id}/policies | actor={user.sub} role={user.role.value}"
+    )
+
+    try:
+        rows = await mcp_router.call(
+            "legacy-provider", "get_policies_by_user_id",
+            caller_role=user.role,
+            user_id=user_id,
+        )
+    except ValueError as e:
+        logger.warning(f"GET /users/{user_id}/policies not found: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found",
+        )
+    except Exception as e:
+        logger.error(f"GET /users/{user_id}/policies upstream error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal error retrieving policies",
+        )
+
+    policies = [PolicyResponse(**r) for r in rows]
+    return PolicyListResponse(
+        user_id=user_id,
+        policies=policies,
+        total=len(policies),
+    )

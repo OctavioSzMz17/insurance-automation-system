@@ -18,11 +18,22 @@ Rules applied:
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import uuid
 from pathlib import Path
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 
 _ORCH_ROOT     = Path(__file__).resolve().parents[1]
 _PROJECT_ROOT  = _ORCH_ROOT.parent
@@ -33,6 +44,7 @@ from packages.common.schemas.api import (  # noqa: E402
     ClaimSubmitRequest,
     ClaimSubmitResponse,
     ClaimStatusResponse,
+    ClaimListResponse,
     ClaimApproveRequest,
     ClaimRejectRequest,
 )
@@ -133,6 +145,206 @@ async def submit_claim(
         auditor_latency_ms=result.auditor_latency_ms,
         total_latency_ms=result.total_latency_ms,
         error_message=result.error_message,
+    )
+
+
+# ── POST /claims/submit-upload (multipart) ───────────────────────
+
+# Shared volume for uploaded PDFs (inside the orchestrator container).
+# In production this is a PVC mounted by both orchestrator + documents MCP.
+_UPLOAD_DIR = Path(os.getenv("CLAIM_UPLOAD_DIR", "/tmp/claim-uploads"))
+_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+_MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB cap (matches PDF MCP limit)
+
+
+@router.post(
+    "/submit-upload",
+    response_model=ClaimSubmitResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Submit a new claim PDF via multipart upload",
+    description=(
+        "Accepts a PDF file as `multipart/form-data` (browser-friendly), "
+        "stages it in the orchestrator's upload volume, then runs the "
+        "full analyst → auditor pipeline. Requires `analyst` role+."
+    ),
+    responses={
+        400: {"description": "Missing or invalid PDF file"},
+        401: {"description": "Missing or invalid token"},
+        403: {"description": "Insufficient role"},
+        413: {"description": "File exceeds size limit"},
+        503: {"description": "Agent router not ready"},
+    },
+)
+async def submit_claim_upload(
+    request:    Request,
+    pdf:        UploadFile = File(..., description="Claim report PDF"),
+    user:       UserPrincipal = Depends(require_role(Role.ANALYST)),
+    mcp_router: MCPRouter     = Depends(get_mcp_router),
+) -> ClaimSubmitResponse:
+    """Upload a PDF and run the full agent pipeline against it."""
+    request_id = str(uuid.uuid4())
+    logger.info(
+        f"POST /claims/submit-upload | request_id={request_id} actor={user.sub} "
+        f"role={user.role.value} filename={pdf.filename}"
+    )
+
+    # ── Validate ─────────────────────────────────────────────
+    if not pdf.filename or not pdf.filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A .pdf file is required",
+        )
+
+    # ── Stage the upload on disk with a stable, sanitised name ──
+    safe_name = f"{request_id}.pdf"
+    target = _UPLOAD_DIR / safe_name
+    try:
+        bytes_written = 0
+        with target.open("wb") as out:
+            while True:
+                chunk = await pdf.read(1024 * 1024)  # 1 MB chunks
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > _MAX_UPLOAD_BYTES:
+                    out.close()
+                    target.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=f"PDF exceeds {_MAX_UPLOAD_BYTES // (1024*1024)} MB limit",
+                    )
+                out.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"POST /claims/submit-upload | stage failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to stage uploaded file",
+        )
+
+    logger.info(
+        f"POST /claims/submit-upload | request_id={request_id} "
+        f"staged bytes={bytes_written} path={target}"
+    )
+
+    # ── Delegate to the existing pipeline path ───────────────
+    agent_router = getattr(request.app.state, "agent_router", None)
+    if agent_router is None:
+        target.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Agent router not ready — try again shortly.",
+        )
+
+    try:
+        result = await agent_router.process_claim(str(target))
+    finally:
+        # Don't delete the staged file — useful for forensic replay
+        pass
+
+    recommendation: str | None = None
+    persisted_id: int | None = None
+    claim_status_persisted: str | None = None
+    summary: str | None = None
+    if result.claim_decision:
+        recommendation = result.claim_decision.get("decision")
+        persisted_id   = result.claim_decision.get("persisted_claim_id")
+    if result.triage_report:
+        summary = result.triage_report.get("summary")
+
+    if persisted_id is not None:
+        try:
+            persisted = await mcp_router.call(
+                "claims", "get_claim_by_id",
+                caller_role=user.role,
+                claim_id=persisted_id,
+            )
+            claim_status_persisted = persisted.get("claim_status")
+        except Exception as e:
+            logger.warning(
+                f"POST /claims/submit-upload | could not re-read persisted "
+                f"claim {persisted_id}: {e}"
+            )
+
+    return ClaimSubmitResponse(
+        request_id=request_id,
+        pipeline_status=result.pipeline_status,
+        recommended_decision=recommendation,
+        claim_status=claim_status_persisted,
+        persisted_claim_id=persisted_id,
+        summary=summary,
+        triage_report=result.triage_report,
+        claim_decision=result.claim_decision,
+        analyst_retries=result.analyst_retries,
+        auditor_retries=result.auditor_retries,
+        analyst_latency_ms=result.analyst_latency_ms,
+        auditor_latency_ms=result.auditor_latency_ms,
+        total_latency_ms=result.total_latency_ms,
+        error_message=result.error_message,
+    )
+
+
+# ── GET /claims (list) ───────────────────────────────────────────
+
+@router.get(
+    "",
+    response_model=ClaimListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List persisted claims (review queue)",
+    description=(
+        "Returns a paginated list of claim rows ordered most-recent-first. "
+        "Optional `status` filter narrows by claim_status (e.g. "
+        "`MANUAL_REVIEW`). Requires `analyst` role+."
+    ),
+    responses={
+        400: {"description": "Invalid status / pagination params"},
+        401: {"description": "Missing or invalid token"},
+        403: {"description": "Insufficient role"},
+        500: {"description": "Database error"},
+    },
+)
+async def list_claims_endpoint(
+    status_filter: Optional[str] = Query(
+        None, alias="status",
+        description="Filter by claim_status (e.g. MANUAL_REVIEW).",
+    ),
+    limit:  int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    user:       UserPrincipal = Depends(require_role(Role.ANALYST)),
+    mcp_router: MCPRouter     = Depends(get_mcp_router),
+) -> ClaimListResponse:
+    """Return the review queue."""
+    logger.info(
+        f"GET /claims | actor={user.sub} role={user.role.value} "
+        f"status={status_filter} limit={limit} offset={offset}"
+    )
+
+    try:
+        rows = await mcp_router.call(
+            "claims", "list_claims",
+            caller_role=user.role,
+            status=status_filter,
+            limit=limit,
+            offset=offset,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except RuntimeError as e:
+        logger.error(f"GET /claims DB error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal error listing claims",
+        )
+
+    return ClaimListResponse(
+        claims=[ClaimStatusResponse(**r) for r in rows],
+        total=len(rows),
+        limit=limit,
+        offset=offset,
     )
 
 

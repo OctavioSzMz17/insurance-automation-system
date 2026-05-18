@@ -17,6 +17,24 @@
 # ============================================================
 
 services:
+  # ── Next.js UI ──────────────────────────────────────────────
+  ui:
+    build:
+      context: ../../ui                   # ui folder
+      dockerfile: Dockerfile
+    image: insureai-ui:dev
+    container_name: insureai-ui
+    environment:
+      # Browser connects via host port mapping, so localhost:8000 is correct
+      NEXT_PUBLIC_API_URL: "http://localhost:8000"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - orchestrator
+    restart: unless-stopped
+    networks:
+      - insureai
+
   # ── Orchestrator (FastAPI) ──────────────────────────────────
   orchestrator:
     build:
