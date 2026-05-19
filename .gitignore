@@ -15,6 +15,9 @@ lib64/
 # Python venv `lib/` rule above must not swallow UI source folders.
 !ui/src/lib/
 !ui/src/lib/**
+
+# Claude Code session state — local-only
+.claude/
 parts/
 sdist/
 var/

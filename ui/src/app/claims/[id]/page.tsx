@@ -1,12 +1,15 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useTranslations, useLocale } from 'next-intl';
 import {
   getClaimDetail,
   approveClaim,
   rejectClaim,
+  reanalyzeClaim,
+  reanalyzeClaimWithUpload,
+  isPdfMissingError,
   getUser,
   getUserPolicies,
   Claim,
@@ -27,6 +30,8 @@ import {
   Mail,
   ShieldCheck,
   ExternalLink,
+  Upload,
+  X as XIcon,
 } from 'lucide-react';
 
 const REASON_MIN_LENGTH = 20;
@@ -68,23 +73,33 @@ function useFormatters() {
   const locale = useLocale();
   const tag = locale === 'es' ? 'es-MX' : 'en-US';
 
+  // Date-only ISO strings ('YYYY-MM-DD') get parsed by `new Date()` as
+  // midnight UTC. Rendering them in a non-UTC zone shifts the day (e.g.
+  // '2026-01-01' → '31 dic 2025' in Mexico). Pin to UTC so the day the
+  // backend stored is the day the adjuster sees.
+  const isDateOnly = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
+
   return {
-    longDate: (iso: string | null) =>
-      iso
-        ? new Date(iso).toLocaleDateString(tag, {
-            month: 'long',
-            day: 'numeric',
-            year: 'numeric',
-          })
-        : '—',
-    shortDate: (iso: string | null) =>
-      iso
-        ? new Date(iso).toLocaleDateString(tag, {
-            day: '2-digit',
-            month: 'short',
-            year: 'numeric',
-          })
-        : '—',
+    longDate: (iso: string | null) => {
+      if (!iso) return '—';
+      const opts: Intl.DateTimeFormatOptions = {
+        month: 'long',
+        day: 'numeric',
+        year: 'numeric',
+      };
+      if (isDateOnly(iso)) opts.timeZone = 'UTC';
+      return new Date(iso).toLocaleDateString(tag, opts);
+    },
+    shortDate: (iso: string | null) => {
+      if (!iso) return '—';
+      const opts: Intl.DateTimeFormatOptions = {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+      };
+      if (isDateOnly(iso)) opts.timeZone = 'UTC';
+      return new Date(iso).toLocaleDateString(tag, opts);
+    },
     dateTime: (iso: string) => {
       const d = new Date(iso);
       if (Number.isNaN(d.getTime())) return iso;
@@ -225,6 +240,53 @@ function OverrideBubble({
   );
 }
 
+function ReanalysisBubble({
+  decision,
+  actor,
+  timestamp,
+  notes,
+}: {
+  decision: string;
+  actor: string;
+  timestamp: string;
+  notes: string;
+}) {
+  const t = useTranslations('claim.reasoning');
+  const tVerb = useTranslations('decisions.verb');
+  const { dateTime } = useFormatters();
+  const verb = tVerb(decision as 'APPROVED') || decision.toLowerCase();
+  return (
+    <div className="flex gap-3">
+      <AiAvatar />
+      <div className="flex-1 glass-sm rounded-lg p-4 space-y-2 border-l-2 border-blue-500/40">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-white/90 text-sm font-semibold">{AI_BRAND.name}</span>
+          <RefreshCw className="w-3.5 h-3.5 text-blue-300" />
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-900/40 text-blue-300 border border-blue-700 uppercase tracking-wider font-semibold">
+            {t('reanalysisTag')}
+          </span>
+          <DecisionPill decision={decision} />
+          <span className="text-white/30 text-xs ml-auto">{dateTime(timestamp)}</span>
+        </div>
+        <p className="text-white/40 text-xs">{t('reanalysisSummary', { verb })}</p>
+        {notes && (
+          <div className="bg-black/20 border border-white/5 rounded-lg p-3 mt-2">
+            <p className="text-[11px] text-white/40 uppercase tracking-wider mb-1">
+              {t('analystNotes')}
+            </p>
+            <p className="text-white/80 text-sm leading-relaxed whitespace-pre-wrap">
+              {notes}
+            </p>
+          </div>
+        )}
+        <p className="text-[10px] text-white/30 italic">
+          {actor}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function NoteBubble({ text }: { text: string }) {
   const tAi = useTranslations('ai');
   return (
@@ -268,6 +330,17 @@ function ReasoningPanel({ claim }: { claim: Claim }) {
               actor={b.actor}
               timestamp={b.timestamp}
               reason={b.reason}
+            />
+          );
+        }
+        if (b.kind === 'reanalysis') {
+          return (
+            <ReanalysisBubble
+              key={i}
+              decision={b.decision}
+              actor={b.actor}
+              timestamp={b.timestamp}
+              notes={b.notes}
             />
           );
         }
@@ -611,14 +684,31 @@ function CustomerPanel({ claim }: { claim: Claim }) {
             </span>
           </div>
 
-          <span
-            className={`inline-flex text-[11px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider ${
-              POLICY_STATUS_STYLES[linkedPolicy.status] ??
-              'bg-white/10 text-white/70 border border-white/20'
-            }`}
-          >
-            {localizedPolicyStatus(linkedPolicy.status)}
-          </span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span
+              className={`inline-flex text-[11px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wider ${
+                POLICY_STATUS_STYLES[linkedPolicy.status] ??
+                'bg-white/10 text-white/70 border border-white/20'
+              }`}
+            >
+              {localizedPolicyStatus(linkedPolicy.status)}
+            </span>
+            {linkedPolicy.stored_status &&
+              linkedPolicy.stored_status !== linkedPolicy.status && (
+                <span
+                  title={t('statusDrift', {
+                    effective: localizedPolicyStatus(linkedPolicy.status),
+                    stored: localizedPolicyStatus(linkedPolicy.stored_status),
+                    endDate: shortDate(linkedPolicy.end_date),
+                  })}
+                  className="text-[10px] text-amber-300/80 italic cursor-help underline decoration-dotted"
+                >
+                  {t('statusDriftShort', {
+                    endDate: shortDate(linkedPolicy.end_date),
+                  })}
+                </span>
+              )}
+          </div>
 
           <div className="grid grid-cols-2 gap-3 pt-2 border-t border-white/5">
             <div>
@@ -719,6 +809,210 @@ function CustomerPanel({ claim }: { claim: Claim }) {
         </details>
       )}
     </div>
+  );
+}
+
+// ── Re-analyze button (lives in reasoning panel header) ─────
+//
+// Tries the stored-PDF path first. If the backend returns 409
+// (pdf_missing), opens a small modal asking the adjuster to re-upload
+// the document. Once uploaded, the new PDF replaces the missing one
+// on the volume so subsequent re-analyses don't need to re-upload.
+
+function ReuploadModal({
+  claim,
+  onClose,
+  onSuccess,
+}: {
+  claim: Claim;
+  onClose: () => void;
+  onSuccess: (c: Claim) => void;
+}) {
+  const t = useTranslations('claim.reasoning');
+  const tCommon = useTranslations('common');
+  const tErr = useTranslations('errors');
+  const tSubmit = useTranslations('submit');
+  const { notify } = useSnackbar();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [pdf, setPdf] = useState<File | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [inlineError, setInlineError] = useState<string>('');
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setInlineError('');
+    if (!pdf) {
+      notify.warning(tSubmit('noFile'));
+      return;
+    }
+    setLoading(true);
+    try {
+      const updated = await reanalyzeClaimWithUpload(claim.claim_id, pdf);
+      onSuccess(updated);
+      notify.success({
+        title: t('reanalyzeSuccessTitle'),
+        message: t('reanalyzeSuccessMessage', {
+          brand: AI_BRAND.name,
+          id: claim.claim_id,
+        }),
+      });
+    } catch (err) {
+      const fe = toFriendlyError(err, { t: tErr });
+      // Show in BOTH places: snackbar (top-right) and inline inside the
+      // modal so the failure is impossible to miss while focused on the
+      // upload form.
+      notify({ tone: fe.tone, title: fe.title, message: fe.message });
+      setInlineError(`${fe.title}: ${fe.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div
+        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        onClick={loading ? undefined : onClose}
+      />
+      <div className="relative glass w-full max-w-lg p-6 space-y-5">
+        <div className="flex items-center justify-between">
+          <h2 className="text-xl font-bold gradient-text">{t('reuploadTitle')}</h2>
+          <button
+            onClick={onClose}
+            disabled={loading}
+            className="text-white/40 hover:text-white/80 transition-colors disabled:opacity-50"
+            aria-label={tCommon('close')}
+          >
+            <XIcon className="w-5 h-5" />
+          </button>
+        </div>
+
+        <p className="text-white/50 text-xs leading-relaxed">
+          {t('reuploadDescription', { brand: AI_BRAND.name })}
+        </p>
+
+        {inlineError && (
+          <div className="flex items-start gap-2 text-red-300 text-sm bg-red-900/30 border border-red-800 rounded-lg px-3 py-2">
+            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <span className="whitespace-pre-wrap">{inlineError}</span>
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div
+            onClick={() => fileRef.current?.click()}
+            className="border-2 border-dashed border-white/20 rounded-lg p-8 text-center cursor-pointer hover:border-purple-500/50 transition-colors"
+          >
+            <input
+              ref={fileRef}
+              type="file"
+              accept="application/pdf,.pdf"
+              className="hidden"
+              onChange={(e) => setPdf(e.target.files?.[0] || null)}
+            />
+            <Upload className="w-7 h-7 text-purple-400 mx-auto mb-2" />
+            <p className="text-sm text-white/70">
+              {pdf ? pdf.name : tSubmit('uploadHint')}
+            </p>
+            {pdf && (
+              <p className="text-xs text-white/40 mt-1">
+                {tSubmit('fileSize', { kb: (pdf.size / 1024).toFixed(1) })}
+              </p>
+            )}
+          </div>
+
+          {loading && (
+            <p className="text-xs text-white/50 text-center">
+              {tSubmit('analyzing', { brand: AI_BRAND.name })}
+            </p>
+          )}
+
+          <div className="flex gap-3 pt-1">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={loading}
+              className="flex-1 py-2 text-sm text-white/50 border border-white/10 rounded-lg hover:text-white/80 transition-colors disabled:opacity-50"
+            >
+              {tCommon('cancel')}
+            </button>
+            <button
+              type="submit"
+              disabled={loading || !pdf}
+              className="flex-1 py-2 text-sm font-semibold bg-purple-600/50 hover:bg-purple-600/70 border border-purple-500 text-purple-100 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {loading && <RefreshCw className="w-3 h-3 animate-spin" />}
+              {t('reuploadConfirm')}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function ReanalyzeButton({
+  claim,
+  onUpdated,
+}: {
+  claim: Claim;
+  onUpdated: (c: Claim) => void;
+}) {
+  const t = useTranslations('claim.reasoning');
+  const tErr = useTranslations('errors');
+  const { notify } = useSnackbar();
+  const [loading, setLoading] = useState(false);
+  const [showUpload, setShowUpload] = useState(false);
+
+  const run = async () => {
+    setLoading(true);
+    try {
+      const updated = await reanalyzeClaim(claim.claim_id);
+      onUpdated(updated);
+      notify.success({
+        title: t('reanalyzeSuccessTitle'),
+        message: t('reanalyzeSuccessMessage', {
+          brand: AI_BRAND.name,
+          id: claim.claim_id,
+        }),
+      });
+    } catch (err) {
+      // The backend tells us "PDF missing" via 409 + structured detail.
+      // Treat that as a happy-path branch: open the upload modal instead
+      // of surfacing it as an error toast.
+      if (isPdfMissingError(err)) {
+        setShowUpload(true);
+      } else {
+        const fe = toFriendlyError(err, { t: tErr });
+        notify({ tone: fe.tone, title: fe.title, message: fe.message });
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        onClick={run}
+        disabled={loading}
+        className="flex items-center gap-2 px-3 py-1.5 glass-sm hover:bg-white/10 transition-colors rounded-lg text-white/70 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+        {loading ? t('reanalyzing') : t('reanalyzeButton')}
+      </button>
+
+      {showUpload && (
+        <ReuploadModal
+          claim={claim}
+          onClose={() => setShowUpload(false)}
+          onSuccess={(updated) => {
+            onUpdated(updated);
+            setShowUpload(false);
+          }}
+        />
+      )}
+    </>
   );
 }
 
@@ -867,7 +1161,10 @@ export default function ClaimDetailPage() {
               <h2 className="text-white/80 font-semibold text-sm uppercase tracking-wider">
                 {tReason('title')}
               </h2>
-              <span className="text-white/40 text-xs">{tAi('fullName')}</span>
+              <div className="flex items-center gap-3">
+                <span className="text-white/40 text-xs">{tAi('fullName')}</span>
+                <ReanalyzeButton claim={claim} onUpdated={setClaim} />
+              </div>
             </div>
             <ReasoningPanel claim={claim} />
           </div>

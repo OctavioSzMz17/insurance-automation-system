@@ -30,6 +30,13 @@ export type ReasoningBlock =
       notes: string;
     }
   | {
+      kind: 'reanalysis';
+      decision: string;
+      actor: string;
+      timestamp: string;
+      notes: string;
+    }
+  | {
       kind: 'note';
       text: string;
     };
@@ -39,6 +46,9 @@ const RECOMMENDED_RE =
 
 const OVERRIDE_RE =
   /\[MANUAL OVERRIDE\s*[—\-]\s*([0-9T:.+\-Z]+)\s+by\s+([^\]]+)\]\s*([\s\S]*?)(?=\n\[|$)/g;
+
+const REANALYSIS_RE =
+  /\[RE-ANALYSIS\s*[—\-]\s*([0-9T:.+\-Z]+)\s+by\s+([^\]]+)\]\s*([\s\S]*?)(?=\n\[|$)/g;
 
 /** Split a single override body into `Status set to X.` + `Reason: …`. */
 function splitOverrideBody(body: string): { notes: string; reason: string } {
@@ -95,6 +105,26 @@ export function parseReasoning(raw: string | null | undefined): ReasoningBlock[]
         actor: m[2].trim(),
         reason: body.reason,
         notes: body.notes,
+      },
+    });
+  }
+
+  for (const m of raw.matchAll(REANALYSIS_RE)) {
+    // Body format: "Recommendation: APPROVED. <notes>\nRaw: {json}"
+    const body = m[3].trim();
+    const recoMatch = body.match(/^Recommendation:\s*([A-Z_]+)\.\s*([\s\S]*?)(?:\nRaw:|$)/);
+    const decision = recoMatch?.[1]?.trim() || 'UPDATED';
+    const notes = (recoMatch?.[2] ?? body).trim();
+
+    matches.push({
+      start: m.index ?? 0,
+      end: (m.index ?? 0) + m[0].length,
+      block: {
+        kind: 'reanalysis',
+        decision,
+        timestamp: m[1].trim(),
+        actor: m[2].trim(),
+        notes,
       },
     });
   }

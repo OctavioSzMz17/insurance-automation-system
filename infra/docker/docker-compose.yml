@@ -53,6 +53,10 @@ services:
     restart: unless-stopped
     networks:
       - insureai
+    volumes:
+      # Persist uploaded PDFs across container rebuilds so the
+      # /claims/{id}/reanalyze endpoint can find the original document.
+      - claim_uploads:/tmp/claim-uploads
     # If you start the local-db profile, wait for Postgres to be healthy
     # before booting the orchestrator. Harmless when local-db is off.
     depends_on:
@@ -110,3 +114,5 @@ networks:
 volumes:
   pgdata:
     name: insureai-pgdata
+  claim_uploads:
+    name: insureai-claim-uploads

@@ -121,7 +121,16 @@
       "summary": "Tras analizar el documento y la póliza vinculada, te sugiero {verb} este siniestro.",
       "analystNotes": "Notas del análisis",
       "markedAs": "marcó como",
-      "adjusterReason": "Razón del adjuster"
+      "adjusterReason": "Razón del adjuster",
+      "reanalysisTag": "Re-análisis",
+      "reanalysisSummary": "Analicé de nuevo el caso con los datos más recientes y te sugiero {verb} este siniestro.",
+      "reanalyzeButton": "Volver a analizar",
+      "reanalyzing": "Re-analizando…",
+      "reanalyzeSuccessTitle": "Análisis actualizado",
+      "reanalyzeSuccessMessage": "{brand} re-evaluó el siniestro #{id} con los datos actuales.",
+      "reuploadTitle": "Sube de nuevo el PDF",
+      "reuploadDescription": "No tenemos el documento original guardado para este siniestro. Súbelo otra vez para que {brand} pueda re-analizarlo. Se guardará automáticamente para próximas revisiones.",
+      "reuploadConfirm": "Subir y re-analizar"
     },
     "action": {
       "title": "Decisión del Adjuster",
@@ -163,7 +172,9 @@
       "outOfCoverage": "El incidente del {date} queda fuera de la vigencia de esta póliza.",
       "policyMissing": "La póliza #{id} no aparece en este cliente",
       "policyMissingHint": "Posible discrepancia de datos — verifica con el equipo de soporte.",
-      "otherPolicies": "Otras pólizas del cliente ({count})"
+      "otherPolicies": "Otras pólizas del cliente ({count})",
+      "statusDrift": "El sistema marcó esta póliza como {effective} (registrada como {stored} en el legacy). Vigencia expiró el {endDate}.",
+      "statusDriftShort": "Vigencia expiró el {endDate}"
     }
   },
   "errors": {

@@ -89,11 +89,22 @@ class AgentRouter:
 
     # ── Public entry point ────────────────────────────────────────
 
-    async def process_claim(self, pdf_path: str) -> ClaimProcessingResult:
+    async def process_claim(
+        self,
+        pdf_path: str,
+        *,
+        persist: bool = True,
+    ) -> ClaimProcessingResult:
         """Run the full pipeline for one PDF and return a structured result.
 
         Args:
             pdf_path: Absolute path to the claim PDF.
+            persist:  When True (default), the auditor is instructed to call
+                      the `create_claim` MCP tool and a new claim row is
+                      written. When False, both agents run to completion
+                      and produce a recommendation, but **no DB write
+                      happens** — useful for re-analysis of an existing
+                      claim where we only want fresh reasoning.
 
         Returns:
             ClaimProcessingResult with both stages' outputs, retry counts,
@@ -140,7 +151,7 @@ class AgentRouter:
         try:
             u_state = await self.auditor_pipeline.run(
                 self.auditor,
-                {"triage_report": triage_report},
+                {"triage_report": triage_report, "persist": persist},
                 triage_report=triage_report,  # cross-reference context for validator
             )
         except Exception as e:

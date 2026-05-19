@@ -121,7 +121,16 @@
       "summary": "After analyzing the document and the linked policy, I suggest you {verb} this claim.",
       "analystNotes": "Analysis notes",
       "markedAs": "marked as",
-      "adjusterReason": "Adjuster's reason"
+      "adjusterReason": "Adjuster's reason",
+      "reanalysisTag": "Re-analysis",
+      "reanalysisSummary": "I reviewed the case again with the latest data and I suggest you {verb} this claim.",
+      "reanalyzeButton": "Re-analyze",
+      "reanalyzing": "Re-analyzing…",
+      "reanalyzeSuccessTitle": "Analysis updated",
+      "reanalyzeSuccessMessage": "{brand} re-evaluated claim #{id} with current data.",
+      "reuploadTitle": "Upload the PDF again",
+      "reuploadDescription": "We don't have the original document stored for this claim. Upload it again so {brand} can re-analyze it. It will be saved automatically for future reviews.",
+      "reuploadConfirm": "Upload and re-analyze"
     },
     "action": {
       "title": "Adjuster Decision",
@@ -163,7 +172,9 @@
       "outOfCoverage": "The incident on {date} falls outside this policy's valid period.",
       "policyMissing": "Policy #{id} doesn't appear under this customer",
       "policyMissingHint": "Possible data discrepancy — please check with the support team.",
-      "otherPolicies": "Customer's other policies ({count})"
+      "otherPolicies": "Customer's other policies ({count})",
+      "statusDrift": "System flipped this policy to {effective} (recorded as {stored} in legacy). Coverage ended on {endDate}.",
+      "statusDriftShort": "Coverage ended on {endDate}"
     }
   },
   "errors": {

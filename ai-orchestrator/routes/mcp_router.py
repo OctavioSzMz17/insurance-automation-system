@@ -140,6 +140,11 @@ class MCPRouter:
             load_mcp_tool("claims", "update_claim_status"),
             write_restricted=True,
         ))
+        self.register(ToolInfo(
+            "claims", "append_reasoning",
+            load_mcp_tool("claims", "append_reasoning"),
+            write_restricted=True,
+        ))
 
     def register(self, info: ToolInfo) -> None:
         key = (info.mcp, info.tool)

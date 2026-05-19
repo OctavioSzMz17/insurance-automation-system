@@ -38,6 +38,9 @@ from packages.common.schemas.api import (  # noqa: E402
     PolicyResponse,
     PolicyListResponse,
 )
+from packages.common.business_rules import (  # noqa: E402
+    compute_effective_policy_status,
+)
 
 from auth                  import Role, UserPrincipal, require_role  # noqa: E402
 from routes.mcp_router      import MCPRouter, get_mcp_router          # noqa: E402
@@ -142,7 +145,18 @@ async def get_user_policies(
             detail="Internal error retrieving policies",
         )
 
-    policies = [PolicyResponse(**r) for r in rows]
+    # Stamp the effective status on each policy so the UI / agent see the
+    # truth as of today. The raw value is preserved in `stored_status` so
+    # auditors can spot drift between what was persisted and what we now
+    # report.
+    policies: list[PolicyResponse] = []
+    for r in rows:
+        stored = r.get("status")
+        effective = compute_effective_policy_status(stored, r.get("end_date"))
+        policies.append(PolicyResponse(
+            **{**r, "status": effective, "stored_status": stored},
+        ))
+
     return PolicyListResponse(
         user_id=user_id,
         policies=policies,

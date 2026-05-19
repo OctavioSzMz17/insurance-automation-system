@@ -60,7 +60,9 @@ COPY mcp-servers/claims           ./mcp-servers/claims
 COPY ai-orchestrator              ./ai-orchestrator
 
 # Create and switch to non-root user (Rule 7)
-RUN useradd --uid 1000 --no-create-home --shell /bin/false orchestrator
+RUN useradd --uid 1000 --no-create-home --shell /bin/false orchestrator \
+ && mkdir -p /tmp/claim-uploads \
+ && chown -R orchestrator:orchestrator /tmp/claim-uploads
 USER orchestrator
 
 ENV PYTHONUNBUFFERED=1 \

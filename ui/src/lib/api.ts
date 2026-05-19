@@ -64,7 +64,10 @@ export interface Policy {
   policy_id: number;
   user_id: number;
   type: string;
+  /** Effective status: ACTIVE rows past their end_date are reported as EXPIRED. */
   status: string;
+  /** Raw status as stored in the DB — set when it differs from `status`. */
+  stored_status?: string | null;
   deductible_usd: string;
   coverage_limit_usd: string;
   start_date: string;
@@ -165,6 +168,48 @@ export async function approveClaim(claimId: number, reason: string): Promise<Cla
 export async function rejectClaim(claimId: number, reason: string): Promise<Claim> {
   const res = await api.post<Claim>(`/claims/${claimId}/reject`, { reason });
   return res.data;
+}
+
+export async function reanalyzeClaim(claimId: number): Promise<Claim> {
+  // Backend re-runs the agents against the stored PDF in advisory mode
+  // (no new row) and appends the fresh recommendation to ai_reasoning.
+  //
+  // May throw a 409 AxiosError with `detail.error === 'pdf_missing'` —
+  // callers should catch that and offer to re-upload via
+  // `reanalyzeClaimWithUpload`.
+  const res = await api.post<Claim>(`/claims/${claimId}/reanalyze`, {}, {
+    // The agent pipeline is slow; give it the same headroom as submit.
+    timeout: 120_000,
+  });
+  return res.data;
+}
+
+export async function reanalyzeClaimWithUpload(
+  claimId: number,
+  pdf: File,
+): Promise<Claim> {
+  const fd = new FormData();
+  fd.append('pdf', pdf);
+  const res = await api.post<Claim>(
+    `/claims/${claimId}/reanalyze-upload`,
+    fd,
+    {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120_000,
+    },
+  );
+  return res.data;
+}
+
+/** True if `err` is an AxiosError signalling the PDF needs re-uploading. */
+export function isPdfMissingError(err: unknown): boolean {
+  if (!axios.isAxiosError(err)) return false;
+  if (err.response?.status !== 409) return false;
+  const detail = (err.response.data as { detail?: unknown })?.detail;
+  if (detail && typeof detail === 'object') {
+    return (detail as { error?: string }).error === 'pdf_missing';
+  }
+  return false;
 }
 
 export async function getUser(userId: number): Promise<User> {

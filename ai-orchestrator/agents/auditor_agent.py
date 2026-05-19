@@ -105,11 +105,20 @@ class AuditorAgent:
                     f"{pae.get('attempt')}). You MUST address these issues:\n- "
                     + "\n- ".join(pae.get("violations", []))
                 )
+            # When `persist=False` (used by re-analysis), the auditor must
+            # NOT call create_claim — we only want a fresh recommendation
+            # against current data without inserting a duplicate row.
+            persist = agent_input.get("persist", True)
+            persist_clause = (
+                "call create_claim to persist the result, "
+                if persist
+                else "DO NOT call create_claim (this is an advisory re-analysis), "
+            )
             user_msg = HumanMessage(
                 content=(
                     "Review the TriageReport below and produce the final claim decision. "
-                    "Apply the decision rules from your system prompt, call create_claim "
-                    "to persist the result, then respond with the final JSON object.\n\n"
+                    f"Apply the decision rules from your system prompt, {persist_clause}"
+                    "then respond with the final JSON object.\n\n"
                     "TRIAGE REPORT:\n"
                     + json.dumps(agent_input["triage_report"], ensure_ascii=False, indent=2)
                     + retry_block

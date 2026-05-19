@@ -157,6 +157,11 @@ _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 _MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB cap (matches PDF MCP limit)
 
 
+def _pdf_path_for_claim(claim_id: int) -> Path:
+    """Canonical on-disk location for a claim's original PDF (re-analysis)."""
+    return _UPLOAD_DIR / f"claim-{claim_id}.pdf"
+
+
 @router.post(
     "/submit-upload",
     response_model=ClaimSubmitResponse,
@@ -240,7 +245,8 @@ async def submit_claim_upload(
     try:
         result = await agent_router.process_claim(str(target))
     finally:
-        # Don't delete the staged file — useful for forensic replay
+        # Don't delete the staged file — useful for forensic replay and
+        # for the /reanalyze endpoint that re-runs the agents against it.
         pass
 
     recommendation: str | None = None
@@ -254,6 +260,22 @@ async def submit_claim_upload(
         summary = result.triage_report.get("summary")
 
     if persisted_id is not None:
+        # Rename the staged PDF so it can be looked up by claim_id later
+        # (re-analysis flow). Naming convention is enforced in one place.
+        try:
+            stable = _pdf_path_for_claim(persisted_id)
+            if target.exists() and target != stable:
+                target.replace(stable)
+                logger.info(
+                    f"POST /claims/submit-upload | PDF renamed for replay | "
+                    f"claim_id={persisted_id} path={stable}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"POST /claims/submit-upload | could not rename PDF for "
+                f"claim {persisted_id}: {e}"
+            )
+
         try:
             persisted = await mcp_router.call(
                 "claims", "get_claim_by_id",
@@ -394,6 +416,254 @@ async def get_claim_status(
         )
 
     return ClaimStatusResponse(**row)
+
+
+# ── Re-analysis (shared logic) ───────────────────────────────────
+
+async def _verify_claim_exists(
+    claim_id: int, caller_role: Role, mcp_router: MCPRouter,
+) -> None:
+    """Raise 404 if no claim row exists with this id."""
+    try:
+        await mcp_router.call(
+            "claims", "get_claim_by_id",
+            caller_role=caller_role, claim_id=claim_id,
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Claim {claim_id} not found",
+        )
+
+
+async def _run_reanalysis(
+    *,
+    claim_id:   int,
+    pdf_path:   Path,
+    actor:      str,
+    caller_role: Role,
+    request:    Request,
+    mcp_router: MCPRouter,
+) -> ClaimStatusResponse:
+    """Shared body: run agents in advisory mode + append reasoning.
+
+    Assumes `pdf_path` already points at a real file. Both /reanalyze
+    and /reanalyze-upload funnel into this so the audit-trail format
+    stays identical regardless of how the PDF got staged.
+    """
+    from datetime import datetime, timezone
+    import json as _json
+
+    agent_router = getattr(request.app.state, "agent_router", None)
+    if agent_router is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Agent router not ready — try again shortly.",
+        )
+
+    result = await agent_router.process_claim(str(pdf_path), persist=False)
+
+    if result.pipeline_status != "SUCCESS":
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                f"Re-analysis pipeline returned {result.pipeline_status}: "
+                f"{result.error_message or 'no details'}"
+            ),
+        )
+
+    decision = "UPDATED"
+    if result.claim_decision:
+        decision = result.claim_decision.get("decision") or "UPDATED"
+    summary = (result.triage_report or {}).get("summary") or ""
+    notes_payload: dict[str, object] = {
+        "decision": decision,
+        "summary": summary,
+        "flags": (result.triage_report or {}).get("flags") or [],
+        "auditor_notes": (result.claim_decision or {}).get("rationale")
+                         or (result.claim_decision or {}).get("notes")
+                         or "",
+    }
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    block = (
+        f"[RE-ANALYSIS — {ts} by {actor}]\n"
+        f"Recommendation: {decision}. "
+        f"{notes_payload['auditor_notes'] or summary or 'No additional notes.'}\n"
+        f"Raw: {_json.dumps(notes_payload, ensure_ascii=False)}"
+    )
+
+    try:
+        updated = await mcp_router.call(
+            "claims", "append_reasoning",
+            caller_role=caller_role,
+            claim_id=claim_id,
+            text_to_append=block,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(e),
+        )
+    except Exception as e:
+        logger.error(
+            f"reanalyze append_reasoning failed | claim={claim_id} err={e}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Re-analysis succeeded but could not be saved.",
+        )
+
+    logger.info(
+        f"reanalyze done | claim={claim_id} actor={actor} recommended={decision}"
+    )
+    return ClaimStatusResponse(**updated)
+
+
+# ── POST /claims/{claim_id}/reanalyze ────────────────────────────
+
+@router.post(
+    "/{claim_id}/reanalyze",
+    response_model=ClaimStatusResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Re-run Lía against the stored original PDF",
+    description=(
+        "Looks up the original PDF for this claim on the orchestrator "
+        "volume, runs the analyst → auditor pipeline in advisory mode "
+        "(no new DB row), and appends the fresh recommendation. "
+        "Returns 409 when the PDF is no longer on disk — callers should "
+        "retry via `/reanalyze-upload`. Requires `auditor` role."
+    ),
+    responses={
+        401: {"description": "Missing or invalid token"},
+        403: {"description": "Insufficient role"},
+        404: {"description": "Claim not found"},
+        409: {"description": "Original PDF missing — upload it via /reanalyze-upload"},
+        502: {"description": "Agent pipeline failed"},
+        503: {"description": "Agent router not ready"},
+    },
+)
+async def reanalyze_claim(
+    claim_id:   int,
+    request:    Request,
+    user:       UserPrincipal = Depends(require_role(Role.AUDITOR)),
+    mcp_router: MCPRouter     = Depends(get_mcp_router),
+) -> ClaimStatusResponse:
+    logger.info(
+        f"POST /claims/{claim_id}/reanalyze | actor={user.sub} "
+        f"role={user.role.value}"
+    )
+    await _verify_claim_exists(claim_id, user.role, mcp_router)
+
+    pdf = _pdf_path_for_claim(claim_id)
+    if not pdf.exists():
+        logger.info(
+            f"POST /claims/{claim_id}/reanalyze | PDF missing — 409 returned"
+        )
+        # 409 Conflict: the claim is fine, but the request can't proceed
+        # in its current form (no source document). The structured detail
+        # lets the UI flip cleanly into upload mode.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "pdf_missing",
+                "message": (
+                    f"Original PDF for claim {claim_id} is not on disk. "
+                    f"Please re-upload it to continue."
+                ),
+                "claim_id": claim_id,
+            },
+        )
+
+    return await _run_reanalysis(
+        claim_id=claim_id, pdf_path=pdf,
+        actor=user.sub, caller_role=user.role,
+        request=request, mcp_router=mcp_router,
+    )
+
+
+# ── POST /claims/{claim_id}/reanalyze-upload ─────────────────────
+
+@router.post(
+    "/{claim_id}/reanalyze-upload",
+    response_model=ClaimStatusResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Upload a fresh PDF and re-run Lía against it",
+    description=(
+        "Fallback for /reanalyze when the orchestrator no longer has "
+        "the original PDF on disk (e.g. after a redeploy without a "
+        "persistent volume). The uploaded file is stored as the "
+        "claim's canonical PDF so subsequent re-analyses don't require "
+        "re-uploading. Requires `auditor` role."
+    ),
+    responses={
+        400: {"description": "Missing or invalid PDF"},
+        401: {"description": "Missing or invalid token"},
+        403: {"description": "Insufficient role"},
+        404: {"description": "Claim not found"},
+        413: {"description": "PDF exceeds size limit"},
+    },
+)
+async def reanalyze_claim_upload(
+    claim_id:   int,
+    request:    Request,
+    pdf:        UploadFile = File(..., description="Claim report PDF"),
+    user:       UserPrincipal = Depends(require_role(Role.AUDITOR)),
+    mcp_router: MCPRouter     = Depends(get_mcp_router),
+) -> ClaimStatusResponse:
+    logger.info(
+        f"POST /claims/{claim_id}/reanalyze-upload | actor={user.sub} "
+        f"role={user.role.value} filename={pdf.filename}"
+    )
+    await _verify_claim_exists(claim_id, user.role, mcp_router)
+
+    if not pdf.filename or not pdf.filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A .pdf file is required",
+        )
+
+    # Stream directly into the canonical location for this claim. Any
+    # previous file (e.g. partial / corrupted) is replaced atomically.
+    target = _pdf_path_for_claim(claim_id)
+    try:
+        bytes_written = 0
+        with target.open("wb") as out:
+            while True:
+                chunk = await pdf.read(1024 * 1024)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > _MAX_UPLOAD_BYTES:
+                    out.close()
+                    target.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=(
+                            f"PDF exceeds "
+                            f"{_MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit"
+                        ),
+                    )
+                out.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"POST /claims/{claim_id}/reanalyze-upload stage failed: {e}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to stage uploaded file",
+        )
+
+    logger.info(
+        f"POST /claims/{claim_id}/reanalyze-upload | bytes={bytes_written} "
+        f"stored={target}"
+    )
+
+    return await _run_reanalysis(
+        claim_id=claim_id, pdf_path=target,
+        actor=user.sub, caller_role=user.role,
+        request=request, mcp_router=mcp_router,
+    )
 
 
 # ── POST /claims/{claim_id}/approve ──────────────────────────────

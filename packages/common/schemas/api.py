@@ -114,11 +114,17 @@ class PolicyResponse(BaseModel):
 
     Monetary fields are strings (Rule 2 — never round Decimals via float)
     and dates are ISO-8601 strings.
+
+    `status` is the **effective** status (e.g. an `ACTIVE` row whose
+    `end_date` is in the past is exposed as `EXPIRED`). `stored_status`
+    preserves the raw DB value so the UI can flag the drift and the audit
+    trail keeps both signals. See packages/common/business_rules.py.
     """
     policy_id:          int
     user_id:            int
     type:               str
     status:             str
+    stored_status:      Optional[str] = None
     deductible_usd:     str
     coverage_limit_usd: str
     start_date:         str
