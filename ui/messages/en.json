@@ -132,6 +132,19 @@
       "reuploadDescription": "We don't have the original document stored for this claim. Upload it again so {brand} can re-analyze it. It will be saved automatically for future reviews.",
       "reuploadConfirm": "Upload and re-analyze"
     },
+    "trace": {
+      "expand": "Show detailed reasoning tree",
+      "collapse": "Hide reasoning tree",
+      "summary": "{steps} steps · {latency} · {cost}",
+      "loading": "Loading {brand}'s trace…",
+      "empty": "This claim has no observability trace stored. It was created before {brand} started recording her reasoning.",
+      "errorTitle": "Could not load the trace",
+      "errorBackendDown": "The observability backend is unavailable right now.",
+      "openInLangfuse": "Open in Langfuse",
+      "tokensInOut": "{input} in · {output} out",
+      "noLatency": "—",
+      "stepLabel": "{name}"
+    },
     "action": {
       "title": "Adjuster Decision",
       "currentState": "Current state:",

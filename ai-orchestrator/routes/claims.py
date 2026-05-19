@@ -24,6 +24,11 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+_ORCH_ROOT_FOR_OBS    = Path(__file__).resolve().parents[1]
+_PROJECT_ROOT_FOR_OBS = _ORCH_ROOT_FOR_OBS.parent
+sys.path.insert(0, str(_PROJECT_ROOT_FOR_OBS))
+from observability.correlation import get_trace_id  # noqa: E402
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -47,6 +52,8 @@ from packages.common.schemas.api import (  # noqa: E402
     ClaimListResponse,
     ClaimApproveRequest,
     ClaimRejectRequest,
+    ClaimTraceResponse,
+    TraceObservationItem,
 )
 
 from auth                  import Role, UserPrincipal, require_role  # noqa: E402
@@ -81,7 +88,10 @@ async def submit_claim(
     mcp_router: MCPRouter     = Depends(get_mcp_router),
 ) -> ClaimSubmitResponse:
     """Run the full agent pipeline for a single claim PDF."""
-    request_id = str(uuid.uuid4())
+    # D2.4 — reuse the trace_id the middleware bound to this request.
+    # Falls back to a fresh UUID only when called outside the FastAPI
+    # request scope (tests, scripts).
+    request_id = get_trace_id() or str(uuid.uuid4())
     logger.info(
         f"POST /claims/submit | request_id={request_id} actor={user.sub} "
         f"role={user.role.value} pdf_path={body.pdf_path}"
@@ -95,7 +105,13 @@ async def submit_claim(
             detail="Agent router not ready — try again shortly.",
         )
 
-    result = await agent_router.process_claim(body.pdf_path)
+    result = await agent_router.process_claim(
+        body.pdf_path,
+        trace_name="claim-submit",
+        session_id=request_id,
+        actor=user.sub,
+        trace_metadata={"endpoint": "/claims/submit", "request_id": request_id},
+    )
 
     recommendation: str | None = None
     persisted_id: int | None = None
@@ -187,7 +203,7 @@ async def submit_claim_upload(
     mcp_router: MCPRouter     = Depends(get_mcp_router),
 ) -> ClaimSubmitResponse:
     """Upload a PDF and run the full agent pipeline against it."""
-    request_id = str(uuid.uuid4())
+    request_id = get_trace_id() or str(uuid.uuid4())
     logger.info(
         f"POST /claims/submit-upload | request_id={request_id} actor={user.sub} "
         f"role={user.role.value} filename={pdf.filename}"
@@ -243,7 +259,18 @@ async def submit_claim_upload(
         )
 
     try:
-        result = await agent_router.process_claim(str(target))
+        result = await agent_router.process_claim(
+            str(target),
+            trace_name="claim-submit-upload",
+            session_id=request_id,
+            actor=user.sub,
+            trace_metadata={
+                "endpoint":   "/claims/submit-upload",
+                "request_id": request_id,
+                "filename":   pdf.filename,
+                "bytes":      bytes_written,
+            },
+        )
     finally:
         # Don't delete the staged file — useful for forensic replay and
         # for the /reanalyze endpoint that re-runs the agents against it.
@@ -418,6 +445,185 @@ async def get_claim_status(
     return ClaimStatusResponse(**row)
 
 
+# ── GET /claims/{claim_id}/trace (D5.1) ──────────────────────────
+
+# Markers look like: [trace_id: 0d24-...]   (whitespace tolerant)
+_TRACE_ID_MARKER_RE = __import__("re").compile(
+    r"\[\s*trace_id\s*:\s*([A-Za-z0-9._\-]+)\s*\]"
+)
+
+
+def _extract_trace_ids(ai_reasoning: Optional[str]) -> list[str]:
+    """Return every [trace_id: ...] marker in the text, oldest first.
+
+    `create_claim` prepends one at submit time; each re-analysis appends
+    another. Order in the string IS the chronological order, so the
+    last element is the most recent run.
+    """
+    if not ai_reasoning:
+        return []
+    return _TRACE_ID_MARKER_RE.findall(ai_reasoning)
+
+
+def _shape_observation(o: dict) -> TraceObservationItem:
+    """Map a raw Langfuse observation dict → our flatter schema."""
+    usage = o.get("usage") or {}
+    latency = o.get("latency")  # seconds (float) in Langfuse
+    return TraceObservationItem(
+        id=str(o.get("id") or ""),
+        parent_id=o.get("parentObservationId"),
+        name=o.get("name"),
+        type=o.get("type"),
+        started_at=o.get("startTime"),
+        ended_at=o.get("endTime"),
+        latency_ms=int(latency * 1000) if isinstance(latency, (int, float)) else None,
+        cost_usd=str(o["totalCost"]) if o.get("totalCost") is not None else None,
+        input_tokens=usage.get("input") if isinstance(usage, dict) else None,
+        output_tokens=usage.get("output") if isinstance(usage, dict) else None,
+        level=o.get("level"),
+        status_message=o.get("statusMessage"),
+    )
+
+
+@router.get(
+    "/{claim_id}/trace",
+    response_model=ClaimTraceResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Fetch Lía's trace for a claim (proxy to Langfuse)",
+    description=(
+        "Returns the most recent Langfuse trace associated with the "
+        "claim — LLM calls, tool calls, latencies, costs, tokens. "
+        "Used by the UI to render the reasoning tree inline so "
+        "adjusters never need to open the Langfuse dashboard. "
+        "Requires `analyst` role+."
+    ),
+    responses={
+        401: {"description": "Missing or invalid token"},
+        403: {"description": "Insufficient role"},
+        404: {"description": "Claim not found OR no trace stored for this claim"},
+        502: {"description": "Langfuse is unreachable or returned an error"},
+        503: {"description": "Observability not configured"},
+    },
+)
+async def get_claim_trace(
+    claim_id:   int,
+    user:       UserPrincipal = Depends(require_role(Role.ANALYST)),
+    mcp_router: MCPRouter     = Depends(get_mcp_router),
+) -> ClaimTraceResponse:
+    logger.info(
+        f"GET /claims/{claim_id}/trace | actor={user.sub} role={user.role.value}"
+    )
+
+    # 1) Load the claim — gives us ai_reasoning + a 404 if it doesn't exist.
+    try:
+        row = await mcp_router.call(
+            "claims", "get_claim_by_id",
+            caller_role=user.role, claim_id=claim_id,
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Claim {claim_id} not found",
+        )
+
+    # 2) Pick the most recent trace_id marker.
+    markers = _extract_trace_ids(row.get("ai_reasoning"))
+    if not markers:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"No trace recorded for claim {claim_id}. "
+                f"Likely created before observability was wired."
+            ),
+        )
+    trace_session_id = markers[-1]  # last marker = most recent run
+
+    # 3) Lazy-build the Langfuse client. Returns None if disabled.
+    from observability.langfuse_client import (
+        get_langfuse_client_from_settings, LangfuseUnavailable,
+    )
+    lf = get_langfuse_client_from_settings()
+    if lf is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Langfuse is not configured on this orchestrator.",
+        )
+
+    # 4) Find the trace by session id. We stored session_id == trace_id
+    #    when we wired the callback in agent_router, but Langfuse's own
+    #    trace ids are different opaque strings — we have to look them
+    #    up via the session filter.
+    try:
+        traces = await lf.list_traces_by_session(trace_session_id, limit=1)
+    except LangfuseUnavailable as e:
+        logger.warning(f"GET /claims/{claim_id}/trace | Langfuse down: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Langfuse is currently unreachable.",
+        )
+    if not traces:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"Trace session {trace_session_id} not found in Langfuse "
+                f"(retention may have expired)."
+            ),
+        )
+
+    head = traces[0]
+    langfuse_trace_id = head.get("id") or ""
+
+    # 5) Fetch the full trace (with observations) by its actual id.
+    try:
+        detail = await lf.get_trace(langfuse_trace_id)
+    except LangfuseUnavailable as e:
+        logger.warning(
+            f"GET /claims/{claim_id}/trace | get_trace failed: {e}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Langfuse returned an error fetching the trace.",
+        )
+
+    # 6) Build the browser deep-link (LANGFUSE_PUBLIC_URL because the
+    #    internal docker hostname is unreachable from the user's browser).
+    #
+    # D5.3 — gate the URL by role. The Langfuse dashboard exposes raw
+    # prompts, tool inputs/outputs, retry trees — engineer-level detail
+    # the adjuster shouldn't see (it's confusing and could leak prompts
+    # that contain PII). Only `admin` callers get the link; for everyone
+    # else we send `null` and the UI's existing null-check hides the
+    # button. Defense-in-depth: response itself doesn't contain the URL.
+    from config import get_settings
+    settings = get_settings()
+    langfuse_url: Optional[str] = None
+    if user.role == Role.ADMIN:
+        public_base = (
+            settings.langfuse_public_url
+            or settings.langfuse_host  # last-resort fallback
+        ).rstrip("/")
+        project_id = "orchestrator-dev"  # matches LANGFUSE_INIT_PROJECT_ID
+        langfuse_url = (
+            f"{public_base}/project/{project_id}/traces/{langfuse_trace_id}"
+        )
+
+    observations = [_shape_observation(o) for o in (detail.get("observations") or [])]
+
+    latency_s = detail.get("latency")
+    total_cost = detail.get("totalCost")
+    return ClaimTraceResponse(
+        claim_id=claim_id,
+        trace_id=trace_session_id,
+        name=detail.get("name"),
+        total_latency_ms=int(latency_s * 1000) if isinstance(latency_s, (int, float)) else None,
+        total_cost_usd=str(total_cost) if total_cost is not None else None,
+        started_at=detail.get("timestamp"),
+        ended_at=None,  # Langfuse trace-level doesn't expose ended_at directly
+        langfuse_url=langfuse_url,
+        observations=observations,
+    )
+
+
 # ── Re-analysis (shared logic) ───────────────────────────────────
 
 async def _verify_claim_exists(
@@ -461,7 +667,20 @@ async def _run_reanalysis(
             detail="Agent router not ready — try again shortly.",
         )
 
-    result = await agent_router.process_claim(str(pdf_path), persist=False)
+    # Reuse the per-request trace_id; fall back when out-of-scope.
+    reanalysis_request_id = get_trace_id() or str(uuid.uuid4())
+    result = await agent_router.process_claim(
+        str(pdf_path),
+        persist=False,
+        trace_name="claim-reanalyze",
+        session_id=reanalysis_request_id,
+        actor=actor,
+        trace_metadata={
+            "endpoint":   "/claims/{id}/reanalyze",
+            "claim_id":   claim_id,
+            "request_id": reanalysis_request_id,
+        },
+    )
 
     if result.pipeline_status != "SUCCESS":
         raise HTTPException(
@@ -485,11 +704,19 @@ async def _run_reanalysis(
                          or "",
     }
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # D5.1 — stamp this re-analysis's trace_id so the UI can show the
+    # MOST RECENT Lía run (not just the original submit). The marker
+    # sits inside the re-analysis block so extractor knows which trace
+    # belongs to which event.
+    trace_marker = (
+        f"\n[trace_id: {reanalysis_request_id}]" if reanalysis_request_id else ""
+    )
     block = (
         f"[RE-ANALYSIS — {ts} by {actor}]\n"
         f"Recommendation: {decision}. "
         f"{notes_payload['auditor_notes'] or summary or 'No additional notes.'}\n"
         f"Raw: {_json.dumps(notes_payload, ensure_ascii=False)}"
+        f"{trace_marker}"
     )
 
     try:

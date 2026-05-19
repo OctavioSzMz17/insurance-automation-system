@@ -50,12 +50,18 @@ from routes import claims as claims_routes            # noqa: E402
 from routes import auth   as auth_routes              # noqa: E402
 from routes import users  as users_routes             # noqa: E402
 
+from middleware.trace_id        import TraceIdMiddleware     # noqa: E402
+from observability.logging      import configure_logging     # noqa: E402
 
-# ── Logging (will move to observability layer in a future task) ───
-logging.basicConfig(
-    level=get_settings().log_level.upper(),
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
+
+# ── Logging — D3.1 ──────────────────────────────────────────────
+# Single entry point owns level / format / trace filter. The format is
+# selectable at runtime via LOG_FORMAT=text|json so devs get readable
+# logs and prod / aggregators get structured JSON.
+_settings = get_settings()
+configure_logging(
+    level=_settings.log_level,
+    log_format=("json" if _settings.log_format.lower() == "json" else "text"),
 )
 logger = logging.getLogger("orchestrator")
 
@@ -104,12 +110,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# D2.4 — bind a trace_id to every request as the first thing we do.
+# IMPORTANT: register BEFORE CORS so the contextvar is set even on
+# OPTIONS preflight requests (helps when correlating CORS bugs).
+app.add_middleware(TraceIdMiddleware)
+
 # Permissive CORS for development — C1.4 / C1.5 will tighten this.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Trace-Id"],  # let browsers read it for debugging
 )
 
 # Mount routers

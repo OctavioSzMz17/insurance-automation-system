@@ -132,6 +132,19 @@
       "reuploadDescription": "No tenemos el documento original guardado para este siniestro. Súbelo otra vez para que {brand} pueda re-analizarlo. Se guardará automáticamente para próximas revisiones.",
       "reuploadConfirm": "Subir y re-analizar"
     },
+    "trace": {
+      "expand": "Ver árbol de razonamiento detallado",
+      "collapse": "Ocultar árbol de razonamiento",
+      "summary": "{steps} pasos · {latency} · {cost}",
+      "loading": "Cargando el rastro de {brand}…",
+      "empty": "Este siniestro no tiene rastro de observabilidad guardado. Es de antes de que {brand} comenzara a registrar su razonamiento.",
+      "errorTitle": "No pudimos cargar el rastro",
+      "errorBackendDown": "El sistema de observabilidad no está disponible en este momento.",
+      "openInLangfuse": "Abrir en Langfuse",
+      "tokensInOut": "{input} entrada · {output} salida",
+      "noLatency": "—",
+      "stepLabel": "{name}"
+    },
     "action": {
       "title": "Decisión del Adjuster",
       "currentState": "Estado actual:",

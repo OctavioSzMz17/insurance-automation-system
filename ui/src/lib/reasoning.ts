@@ -64,8 +64,15 @@ function splitOverrideBody(body: string): { notes: string; reason: string } {
 }
 
 /** Parse `ai_reasoning` into ordered, typed blocks. */
+// Internal markers we strip before rendering. `[trace_id: ...]` is
+// written by the backend (D5.1) so it can correlate the claim with
+// its Langfuse trace; humans never need to see it.
+const INTERNAL_MARKER_RE = /\[\s*trace_id\s*:\s*[A-Za-z0-9._\-]+\s*\]/g;
+
 export function parseReasoning(raw: string | null | undefined): ReasoningBlock[] {
   if (!raw || !raw.trim()) return [];
+  // Strip internal markers so they don't leak into NoteBubble blocks.
+  raw = raw.replace(INTERNAL_MARKER_RE, '').replace(/\n{3,}/g, '\n\n');
 
   // Find every tagged match with its index in the source string so we can
   // preserve order across recommendation and override blocks.

@@ -98,6 +98,46 @@ class ClaimListResponse(BaseModel):
     offset: int
 
 
+# ── GET /claims/{id}/trace (D5.1) ────────────────────────────────
+
+class TraceObservationItem(BaseModel):
+    """One node from the Langfuse trace tree, flattened.
+
+    Tree relationships are conveyed via `parent_id`; the UI rebuilds
+    the hierarchy client-side. Optional fields are `None` when Langfuse
+    didn't report them (e.g. tool-call spans don't have token counts).
+    """
+    id:            str
+    parent_id:     Optional[str] = None
+    name:          Optional[str] = None
+    type:          Optional[str] = None      # SPAN | GENERATION | EVENT
+    started_at:    Optional[str] = None
+    ended_at:      Optional[str] = None
+    latency_ms:    Optional[int] = None
+    cost_usd:      Optional[str] = None      # serialised Decimal (Rule 2)
+    input_tokens:  Optional[int] = None
+    output_tokens: Optional[int] = None
+    level:         Optional[str] = None      # DEFAULT | DEBUG | WARNING | ERROR
+    status_message: Optional[str] = None
+
+
+class ClaimTraceResponse(BaseModel):
+    """Response from GET /claims/{claim_id}/trace.
+
+    Returns the most-recent trace associated with the claim plus the
+    deep-link URL the UI can offer for "Open in Langfuse".
+    """
+    claim_id:        int
+    trace_id:        str
+    name:            Optional[str] = None
+    total_latency_ms: Optional[int] = None
+    total_cost_usd:  Optional[str] = None     # Decimal as string
+    started_at:      Optional[str] = None
+    ended_at:        Optional[str] = None
+    langfuse_url:    Optional[str] = None     # browser-accessible deep-link
+    observations:    list[TraceObservationItem] = []
+
+
 # ── GET /users/{id} ──────────────────────────────────────────────
 
 class UserResponse(BaseModel):

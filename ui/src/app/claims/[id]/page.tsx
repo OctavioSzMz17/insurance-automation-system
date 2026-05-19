@@ -20,6 +20,7 @@ import { parseReasoning, ReasoningBlock } from '@/lib/reasoning';
 import { AI_BRAND } from '@/lib/ai';
 import { toFriendlyError } from '@/lib/errors';
 import { useSnackbar } from '@/lib/snackbar';
+import { TracePanel } from '@/components/TracePanel';
 import {
   ArrowLeft,
   CheckCircle,
@@ -1167,6 +1168,7 @@ export default function ClaimDetailPage() {
               </div>
             </div>
             <ReasoningPanel claim={claim} />
+            <TracePanel claimId={claim.claim_id} />
           </div>
         </div>
 

@@ -58,6 +58,7 @@ COPY mcp-servers/legacy-provider  ./mcp-servers/legacy-provider
 COPY mcp-servers/documents        ./mcp-servers/documents
 COPY mcp-servers/claims           ./mcp-servers/claims
 COPY ai-orchestrator              ./ai-orchestrator
+COPY observability                ./observability
 
 # Create and switch to non-root user (Rule 7)
 RUN useradd --uid 1000 --no-create-home --shell /bin/false orchestrator \

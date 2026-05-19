@@ -1,0 +1,10 @@
+{
+  "name":  "Outside vigencia — María García expired policy",
+  "notes": "Basic Third Party policy #2 expired 2024-05-20. Incident on 2026-04-01 is roughly 22 months outside coverage. There is no defensible interpretation under which this is payable — Lía should clearly reject (or at minimum escalate to manual review).",
+  "expected": {
+    "decision": "REJECTED",
+    "severity": null,
+    "must_flag": [],
+    "must_not_flag": []
+  }
+}

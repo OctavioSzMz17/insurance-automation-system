@@ -50,6 +50,11 @@ from validation import (                                          # noqa: E402
     validate_claim_decision,
 )
 
+# Observability — D2.x. Returns a NoopTracer when Langfuse is not
+# configured, so this import is safe regardless of environment.
+sys.path.insert(0, str(_ROOT))  # ensure packages root is on sys.path
+from observability import get_tracer                              # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 
@@ -93,7 +98,11 @@ class AgentRouter:
         self,
         pdf_path: str,
         *,
-        persist: bool = True,
+        persist:        bool = True,
+        trace_name:     str | None = None,
+        session_id:     str | None = None,
+        actor:          str | None = None,
+        trace_metadata: dict[str, Any] | None = None,
     ) -> ClaimProcessingResult:
         """Run the full pipeline for one PDF and return a structured result.
 
@@ -105,6 +114,12 @@ class AgentRouter:
                       and produce a recommendation, but **no DB write
                       happens** — useful for re-analysis of an existing
                       claim where we only want fresh reasoning.
+            trace_name / session_id / actor / trace_metadata:
+                Observability context (D2.x). When the configured tracer is
+                Langfuse, both agents' LLM calls + tool calls end up under
+                a single trace tree named `trace_name`, tagged with
+                `actor` (JWT sub) and `session_id` (orchestrator
+                request_id). Safe to omit — defaults yield a generic trace.
 
         Returns:
             ClaimProcessingResult with both stages' outputs, retry counts,
@@ -113,11 +128,31 @@ class AgentRouter:
         logger.info("AgentRouter.process_claim | pdf_path=%s", pdf_path)
         t_start = time.perf_counter()
 
+        # ── Observability — one handler shared by both stages ────
+        # Sharing it under one trace_name lets us see analyst + auditor
+        # in a single tree in the Langfuse dashboard. NoopTracer
+        # returns None → handlers list stays empty, agents skip the
+        # config arg entirely.
+        tracer = get_tracer()
+        handler = tracer.callback_handler(
+            trace_name=trace_name or "claim-process",
+            user_id=actor,
+            session_id=session_id,
+            tags=["claim-pipeline", "persist" if persist else "advisory"],
+            metadata={
+                "pdf_path": pdf_path,
+                "persist":  persist,
+                **(trace_metadata or {}),
+            },
+        )
+        callbacks = [handler] if handler is not None else []
+
         # ── Stage 1: analyst ──────────────────────────────────────
         a_start = time.perf_counter()
         try:
             a_state = await self.analyst_pipeline.run(
-                self.analyst, {"pdf_path": pdf_path}
+                self.analyst,
+                {"pdf_path": pdf_path, "callbacks": callbacks},
             )
         except Exception as e:
             return self._failed(
@@ -151,8 +186,16 @@ class AgentRouter:
         try:
             u_state = await self.auditor_pipeline.run(
                 self.auditor,
-                {"triage_report": triage_report, "persist": persist},
-                triage_report=triage_report,  # cross-reference context for validator
+                {
+                    "triage_report": triage_report,
+                    "persist":       persist,
+                    "callbacks":     callbacks,
+                },
+                # validator context — keeps both checks honest:
+                #   triage_report → cross-reference fields
+                #   persist       → skip must_call_create_claim when advisory
+                triage_report=triage_report,
+                persist=persist,
             )
         except Exception as e:
             return self._failed(
@@ -189,6 +232,10 @@ class AgentRouter:
             u_state.retry_count, claim_decision.get("decision"),
             claim_decision.get("persisted_claim_id"), total_ms,
         )
+
+        # Flush so the trace lands in Langfuse before the request returns.
+        # Cheap (no-op when tracer is disabled, queue-flush otherwise).
+        tracer.flush()
 
         return ClaimProcessingResult(
             pdf_path=pdf_path,

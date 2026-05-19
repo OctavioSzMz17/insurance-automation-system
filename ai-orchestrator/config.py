@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     environment: str = Field(default="development", alias="ENVIRONMENT")
     log_level: str = Field(default="INFO",     alias="LOG_LEVEL")
 
+    # D3.1 — log formatter selection.
+    # "text" → human-readable pipe-separated format (dev default).
+    # "json" → one JSON object per line (production / aggregators).
+    log_format: str = Field(default="text",    alias="LOG_FORMAT")
+
     # ── LLM (used indirectly via core/models/factory.py) ──────────
     llm_provider:         str = Field(default="claude", alias="LLM_PROVIDER")
     llm_provider_api_key: str = Field(default="",       alias="LLM_PROVIDER_API_KEY")
@@ -48,6 +53,25 @@ class Settings(BaseSettings):
     jwt_secret_key:       str = Field(default="dev-only-replace-me", alias="JWT_SECRET_KEY")
     jwt_algorithm:        str = Field(default="HS256",                alias="JWT_ALGORITHM")
     jwt_expiration_hours: int = Field(default=24,                     alias="JWT_EXPIRATION_HOURS")
+
+    # ── Observability — Langfuse self-hosted (Phase D1.2) ────────
+    # Set all three to opt-in. When `langfuse_public_key` is empty the
+    # tracer factory returns a no-op, so the app keeps working with
+    # no telemetry overhead and no failures.
+    langfuse_host:       str = Field(default="", alias="LANGFUSE_HOST")
+    langfuse_public_key: str = Field(default="", alias="LANGFUSE_PUBLIC_KEY")
+    langfuse_secret_key: str = Field(default="", alias="LANGFUSE_SECRET_KEY")
+    # Browser-accessible URL (D5.1 deep-links); falls back to host if empty.
+    langfuse_public_url: str = Field(default="", alias="LANGFUSE_PUBLIC_URL")
+
+    @property
+    def langfuse_enabled(self) -> bool:
+        """True iff all three Langfuse settings are populated."""
+        return bool(
+            self.langfuse_host
+            and self.langfuse_public_key
+            and self.langfuse_secret_key
+        )
 
 
 @lru_cache(maxsize=1)

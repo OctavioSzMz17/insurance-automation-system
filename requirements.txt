@@ -34,6 +34,12 @@ langchain-anthropic==0.3.21
 langchain-openai==0.3.35
 langchain-ollama==0.3.10
 
+# Observability — Phase D1.2 (Langfuse self-hosted tracing)
+langfuse==2.60.5
+
+# Observability — Phase D3.1 (JSON structured logging)
+python-json-logger==2.0.7
+
 # FastAPI orchestrator — Phase C
 fastapi==0.115.6
 uvicorn[standard]==0.32.1

@@ -80,6 +80,35 @@ export interface PolicyListResponse {
   total: number;
 }
 
+/** Mirrors TraceObservationItem on the backend (D5.1). */
+export interface TraceObservation {
+  id: string;
+  parent_id: string | null;
+  name: string | null;
+  type: 'SPAN' | 'GENERATION' | 'EVENT' | string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  latency_ms: number | null;
+  cost_usd: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  level: 'DEFAULT' | 'DEBUG' | 'WARNING' | 'ERROR' | string | null;
+  status_message: string | null;
+}
+
+/** Mirrors ClaimTraceResponse on the backend (D5.1). */
+export interface ClaimTrace {
+  claim_id: number;
+  trace_id: string;
+  name: string | null;
+  total_latency_ms: number | null;
+  total_cost_usd: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  langfuse_url: string | null;
+  observations: TraceObservation[];
+}
+
 export interface ClaimSubmitResponse {
   request_id: string;
   timestamp: string;
@@ -210,6 +239,14 @@ export function isPdfMissingError(err: unknown): boolean {
     return (detail as { error?: string }).error === 'pdf_missing';
   }
   return false;
+}
+
+export async function getClaimTrace(claimId: number): Promise<ClaimTrace> {
+  // Proxies Langfuse via the orchestrator so the browser never sees
+  // the Langfuse secret key. Returns the flat observations list +
+  // deep-link URL; component builds the tree client-side.
+  const res = await api.get<ClaimTrace>(`/claims/${claimId}/trace`);
+  return res.data;
 }
 
 export async function getUser(userId: number): Promise<User> {

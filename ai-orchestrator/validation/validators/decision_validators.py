@@ -124,12 +124,19 @@ def check_decision_consistency(
     return []
 
 
-def check_persistence_happened(output: dict) -> list[ConstraintViolation]:
+def check_persistence_happened(
+    output: dict, *, persist: bool = True,
+) -> list[ConstraintViolation]:
     """If the decision is APPROVED or REJECTED, the auditor must have actually
     called create_claim. The agent code overwrites persisted_claim_id with the
     real tool result (or None if never called), so a null here means the LLM
     hallucinated its answer without persisting.
+
+    When `persist=False` (re-analysis / eval-harness flow), we explicitly
+    told the auditor NOT to call create_claim, so this check is skipped.
     """
+    if not persist:
+        return []  # advisory mode — no row was supposed to be written
     decision = output.get("decision")
     if decision not in ("APPROVED", "REJECTED"):
         return []  # MANUAL_REVIEW is allowed without persistence
@@ -170,13 +177,19 @@ def check_next_action_matches_decision(output: dict) -> list[ConstraintViolation
 # ── public entry point ───────────────────────────────────────────
 
 def validate_claim_decision(
-    output: Any, triage_report: dict | None = None
+    output: Any,
+    triage_report: dict | None = None,
+    *,
+    persist: bool = True,
 ) -> list[ConstraintViolation]:
     """Run every ClaimDecision validator. Return aggregated violations.
 
     Args:
         output:         Auditor's ClaimDecision dict.
         triage_report:  Original analyst output (used for cross-reference checks).
+        persist:        Whether the agent was instructed to call create_claim.
+                        When False (advisory / re-analysis / eval-harness),
+                        the persistence-related assertions are skipped.
     """
     violations = check_is_dict(output)
     if violations:
@@ -186,6 +199,6 @@ def validate_claim_decision(
     violations.extend(check_reasoning_quality(output))
     violations.extend(check_policy_id_belongs_to_user(output, triage_report))
     violations.extend(check_decision_consistency(output, triage_report))
-    violations.extend(check_persistence_happened(output))
+    violations.extend(check_persistence_happened(output, persist=persist))
     violations.extend(check_next_action_matches_decision(output))
     return violations

@@ -124,7 +124,16 @@ class AuditorAgent:
                     + retry_block
                 )
             )
-            graph_state = await self.executor.ainvoke({"messages": [user_msg]})
+            # D2.3 — forward Langfuse / OTel callbacks if the orchestrator
+            # injected any. Falsy → LangGraph runs with no extra observers.
+            callbacks = agent_input.get("callbacks") or []
+            invoke_kwargs: dict[str, Any] = {}
+            if callbacks:
+                invoke_kwargs["config"] = {"callbacks": callbacks}
+
+            graph_state = await self.executor.ainvoke(
+                {"messages": [user_msg]}, **invoke_kwargs,
+            )
             self._populate_state_from_graph(state, graph_state)
 
         except Exception as e:

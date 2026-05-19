@@ -1,0 +1,245 @@
+# ============================================================
+# Langfuse Self-Hosted Stack — D1.1
+#
+# All Lía's traces, prompts, tool calls, tokens, and costs land
+# here. Engineer-only. Adjusters never see this URL.
+#
+# Architecture (v3):
+#   langfuse-web      → UI + ingest API   :3001 on host
+#   langfuse-worker   → background event processor (internal)
+#   langfuse-pg       → metadata (orgs/projects/users)
+#   langfuse-ch       → traces (ClickHouse, time-series optimized)
+#   langfuse-redis    → async queue between web + worker
+#   langfuse-minio    → blob storage for large payloads (S3-compat)
+#
+# Run:
+#   # 1. App must be up first (it owns the `insureai` network)
+#   docker compose -f infra/docker/docker-compose.yml up -d
+#   # 2. Then this stack
+#   docker compose -f observability/docker-compose.yml up -d
+#
+# Stop everything:
+#   docker compose -f observability/docker-compose.yml down
+#
+# Wipe everything (deletes ALL traces — irreversible):
+#   docker compose -f observability/docker-compose.yml down -v
+#
+# All credentials come from the project-root .env (LANGFUSE_* keys).
+# See observability/README.md for the bootstrap walkthrough.
+# ============================================================
+
+services:
+  # ── Postgres (Langfuse metadata) ─────────────────────────────
+  langfuse-pg:
+    image: postgres:16-alpine
+    container_name: insureai-langfuse-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_POSTGRES_PASSWORD:-langfuse-dev}
+      POSTGRES_DB:       langfuse
+    volumes:
+      - langfuse_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - insureai
+
+  # ── ClickHouse (Langfuse traces) ─────────────────────────────
+  langfuse-ch:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: insureai-langfuse-ch
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB:                        default
+      CLICKHOUSE_USER:                      clickhouse
+      CLICKHOUSE_PASSWORD:                  ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse-dev}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - langfuse_ch_data:/var/lib/clickhouse
+      - langfuse_ch_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+    networks:
+      - insureai
+
+  # ── Redis (Langfuse async queue) ─────────────────────────────
+  langfuse-redis:
+    image: redis:7-alpine
+    container_name: insureai-langfuse-redis
+    restart: unless-stopped
+    command: >
+      --requirepass ${LANGFUSE_REDIS_PASSWORD:-redis-dev}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${LANGFUSE_REDIS_PASSWORD:-redis-dev}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - insureai
+
+  # ── MinIO (S3-compatible blob storage) ───────────────────────
+  langfuse-minio:
+    image: minio/minio:latest
+    container_name: insureai-langfuse-minio
+    restart: unless-stopped
+    entrypoint: sh
+    # On first boot, ensure the bucket Langfuse expects exists.
+    command: >
+      -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER:     minio
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_ROOT_PASSWORD:-minio-dev-password}
+    volumes:
+      - langfuse_minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - insureai
+
+  # ── Langfuse Web (UI + ingest API) ───────────────────────────
+  langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: insureai-langfuse-web
+    restart: unless-stopped
+    depends_on:
+      langfuse-pg:    { condition: service_healthy }
+      langfuse-ch:    { condition: service_healthy }
+      langfuse-redis: { condition: service_healthy }
+      langfuse-minio: { condition: service_healthy }
+    ports:
+      - "3001:3000"
+    environment:
+      # ── DB (postgres metadata) ──────────────────────────────
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_POSTGRES_PASSWORD:-langfuse-dev}@langfuse-pg:5432/langfuse
+      DIRECT_URL:   postgresql://langfuse:${LANGFUSE_POSTGRES_PASSWORD:-langfuse-dev}@langfuse-pg:5432/langfuse
+
+      # ── ClickHouse (traces) ─────────────────────────────────
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-ch:9000
+      CLICKHOUSE_URL:           http://langfuse-ch:8123
+      CLICKHOUSE_USER:          clickhouse
+      CLICKHOUSE_PASSWORD:      ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse-dev}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+
+      # ── Redis ───────────────────────────────────────────────
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:-redis-dev}
+
+      # ── MinIO (S3 blobs for large events) ───────────────────
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET:               langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION:               auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID:        minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY:    ${LANGFUSE_MINIO_ROOT_PASSWORD:-minio-dev-password}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT:             http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE:     "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX:               "events/"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET:               langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION:               auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID:        minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY:    ${LANGFUSE_MINIO_ROOT_PASSWORD:-minio-dev-password}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:             http://langfuse-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE:     "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX:               "media/"
+
+      # ── Auth ────────────────────────────────────────────────
+      NEXTAUTH_URL:    http://localhost:3001
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-please-change-me-32-chars-minimum}
+      SALT:            ${LANGFUSE_SALT:-please-change-me-too}
+      ENCRYPTION_KEY:  ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+
+      # ── Privacy: no phone-home telemetry ───────────────────
+      TELEMETRY_ENABLED:        "false"
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+
+      # ── Auto-bootstrap on first boot (dev only) ────────────
+      # Creates the org, project, admin user, and API keys so we
+      # don't have to click through the UI. The same keys live
+      # in .env so the orchestrator can use them immediately.
+      LANGFUSE_INIT_ORG_ID:               insureai
+      LANGFUSE_INIT_ORG_NAME:             InsureAI
+      LANGFUSE_INIT_PROJECT_ID:           orchestrator-dev
+      LANGFUSE_INIT_PROJECT_NAME:         Orchestrator (dev)
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY:   ${LANGFUSE_PUBLIC_KEY:-pk-lf-dev-insureai}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY:   ${LANGFUSE_SECRET_KEY:-sk-lf-dev-insureai}
+      LANGFUSE_INIT_USER_EMAIL:           ${LANGFUSE_INIT_ADMIN_EMAIL:-admin@insureai.local}
+      LANGFUSE_INIT_USER_NAME:            ${LANGFUSE_INIT_ADMIN_NAME:-InsureAI Admin}
+      LANGFUSE_INIT_USER_PASSWORD:        ${LANGFUSE_INIT_ADMIN_PASSWORD:-insureai-admin-dev}
+    networks:
+      - insureai
+
+  # ── Langfuse Worker (background event processing) ────────────
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: insureai-langfuse-worker
+    restart: unless-stopped
+    depends_on:
+      langfuse-pg:    { condition: service_healthy }
+      langfuse-ch:    { condition: service_healthy }
+      langfuse-redis: { condition: service_healthy }
+      langfuse-minio: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_POSTGRES_PASSWORD:-langfuse-dev}@langfuse-pg:5432/langfuse
+
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-ch:9000
+      CLICKHOUSE_URL:           http://langfuse-ch:8123
+      CLICKHOUSE_USER:          clickhouse
+      CLICKHOUSE_PASSWORD:      ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse-dev}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
+      REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:-redis-dev}
+
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET:               langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION:               auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID:        minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY:    ${LANGFUSE_MINIO_ROOT_PASSWORD:-minio-dev-password}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT:             http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE:     "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX:               "events/"
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET:               langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION:               auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID:        minio
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY:    ${LANGFUSE_MINIO_ROOT_PASSWORD:-minio-dev-password}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT:             http://langfuse-minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE:     "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX:               "media/"
+
+      SALT:           ${LANGFUSE_SALT:-please-change-me-too}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+
+      TELEMETRY_ENABLED: "false"
+    networks:
+      - insureai
+
+# ── External network owned by the main app compose ────────────
+networks:
+  insureai:
+    name: insureai-dev
+    external: true
+
+# ── Persistent volumes (survive rebuilds + restarts) ──────────
+volumes:
+  langfuse_pg:
+    name: insureai-langfuse-pg
+  langfuse_ch_data:
+    name: insureai-langfuse-ch-data
+  langfuse_ch_logs:
+    name: insureai-langfuse-ch-logs
+  langfuse_minio:
+    name: insureai-langfuse-minio

@@ -106,7 +106,18 @@ class AnalystAgent:
             user_msg = HumanMessage(
                 content=f"Triage the claim at pdf_path: {claim_input['pdf_path']}" + retry_block
             )
-            graph_state = await self.executor.ainvoke({"messages": [user_msg]})
+
+            # D2.2 — forward Langfuse / OTel callbacks if the orchestrator
+            # injected any (`callbacks` key in the input dict). Falsy →
+            # LangGraph runs with no extra observers (zero overhead).
+            callbacks = claim_input.get("callbacks") or []
+            invoke_kwargs: dict[str, Any] = {}
+            if callbacks:
+                invoke_kwargs["config"] = {"callbacks": callbacks}
+
+            graph_state = await self.executor.ainvoke(
+                {"messages": [user_msg]}, **invoke_kwargs,
+            )
             self._populate_state_from_graph(state, graph_state)
 
         except Exception as e:
