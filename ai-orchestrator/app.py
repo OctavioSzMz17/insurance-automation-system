@@ -52,6 +52,7 @@ from routes import users  as users_routes             # noqa: E402
 
 from middleware.trace_id        import TraceIdMiddleware     # noqa: E402
 from observability.logging      import configure_logging     # noqa: E402
+from observability.event_bus    import get_event_bus         # noqa: E402
 
 
 # ── Logging — D3.1 ──────────────────────────────────────────────
@@ -91,7 +92,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.error("AgentRouter failed to initialise: %s", e, exc_info=True)
         app.state.agent_router = None
 
+    # E1.1 — start the event-bus GC so orphaned per-request queues
+    # don't pile up if a publisher never gets a subscriber.
+    bus = get_event_bus()
+    bus.start_gc()
+    app.state.event_bus = bus
+    logger.info("EventBus ready (gc=on)")
+
     yield
+
+    bus.stop_gc()
 
     logger.info("Orchestrator shutting down")
     app.state.agent_router = None

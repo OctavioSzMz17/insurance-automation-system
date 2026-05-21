@@ -8,6 +8,8 @@ import { AI_BRAND } from '@/lib/ai';
 import { toFriendlyError } from '@/lib/errors';
 import { useSnackbar } from '@/lib/snackbar';
 import { LanguageToggle } from '@/lib/i18n';
+import { useClaimStream } from '@/lib/use-claim-stream';
+import { LiveStreamTimeline } from '@/components/LiveStreamTimeline';
 import { RefreshCw, Plus, Upload, X, Sparkles } from 'lucide-react';
 
 type TabValue = ClaimStatus | 'ALL';
@@ -49,6 +51,10 @@ function SubmitModal({
   const fileRef = useRef<HTMLInputElement>(null);
   const [pdf, setPdf] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
+  // E2.2 — generate a request id at submit time so we can subscribe to
+  // the SSE stream in parallel with the POST. Null when idle.
+  const [requestId, setRequestId] = useState<string | null>(null);
+  const stream = useClaimStream(requestId);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -57,8 +63,16 @@ function SubmitModal({
       return;
     }
     setLoading(true);
+    // `crypto.randomUUID` is available in every modern browser + the
+    // Next.js dev server. Fallback to a timestamp+random for older
+    // build targets.
+    const rid =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    setRequestId(rid);
     try {
-      const res = await submitClaim(pdf);
+      const res = await submitClaim(pdf, rid);
       if (res.pipeline_status !== 'SUCCESS') {
         notify.error({
           title: t('pipelineErrorTitle', { status: res.pipeline_status }),
@@ -119,10 +133,11 @@ function SubmitModal({
             )}
           </div>
 
-          {loading && (
-            <p className="text-xs text-white/50 text-center">
-              {t('analyzing', { brand: AI_BRAND.name })}
-            </p>
+          {requestId && (
+            <LiveStreamTimeline
+              events={stream.events}
+              status={stream.status}
+            />
           )}
 
           <div className="flex gap-3 pt-1">

@@ -23,6 +23,8 @@ import {
   Sparkles,
   Wrench,
   Activity,
+  GitBranch,
+  AlignLeft,
 } from 'lucide-react';
 
 import {
@@ -94,6 +96,47 @@ function typeIcon(type: string | null) {
       // Spans that look like tool calls get a wrench; others a generic dot.
       return <Wrench className={`${cls} text-white/40`} />;
   }
+}
+
+// ── Flat timeline row (Phase E2.3 — replay view for closed claims) ──
+
+function TimelineRow({ obs }: { obs: TraceObservation }) {
+  const t = useTranslations('claim.trace');
+  const tokens =
+    obs.input_tokens != null || obs.output_tokens != null
+      ? t('tokensInOut', {
+          input: obs.input_tokens ?? 0,
+          output: obs.output_tokens ?? 0,
+        })
+      : null;
+  const cost = formatCost(obs.cost_usd);
+
+  return (
+    <div className="flex items-center gap-2 py-1 px-2 text-sm hover:bg-white/5 rounded">
+      {typeIcon(obs.type)}
+      <span className="text-white/85 truncate flex-1 min-w-0">
+        {obs.name || '(unnamed)'}
+      </span>
+      {tokens && (
+        <span className="text-[11px] text-white/40 hidden sm:inline">{tokens}</span>
+      )}
+      {cost && <span className="text-[11px] text-emerald-300/80">{cost}</span>}
+      <span
+        className={`text-[11px] px-1.5 py-0.5 rounded border font-mono ${latencyTone(
+          obs.latency_ms,
+        )}`}
+      >
+        {formatLatency(obs.latency_ms)}
+      </span>
+    </div>
+  );
+}
+
+/** Observations sorted by start time — chronological replay order. */
+function chronological(observations: TraceObservation[]): TraceObservation[] {
+  return [...observations].sort((a, b) =>
+    (a.started_at || '').localeCompare(b.started_at || ''),
+  );
 }
 
 // ── Tree node row ────────────────────────────────────────────────
@@ -185,6 +228,11 @@ export function TracePanel({ claimId }: { claimId: number }) {
   const [trace, setTrace] = useState<ClaimTrace | null>(null);
   const [loading, setLoading] = useState(false);
   const [emptyReason, setEmptyReason] = useState<string | null>(null);
+  // E2.3 — view-mode toggle. Tree (default) is the hierarchical
+  // explorer from D5.2; timeline replays observations chronologically
+  // — useful when the adjuster wants to scan "what Lía did" linearly
+  // long after the live SubmitModal stream is gone.
+  const [view, setView] = useState<'tree' | 'timeline'>('tree');
 
   const toggle = async () => {
     // Collapse is free; expand may trigger a fetch.
@@ -273,35 +321,82 @@ export function TracePanel({ claimId }: { claimId: number }) {
 
           {!loading && trace && (
             <>
-              {/* Header — totals + deep-link */}
-              <div className="flex items-center justify-between flex-wrap gap-2 text-xs">
+              {/* Header — totals + view toggle + deep-link */}
+              <div className="flex items-center justify-between flex-wrap gap-3 text-xs">
                 <div className="flex items-center gap-3 text-white/50">
-                  <span>
-                    <span className="text-white/30">{t('summary', {
+                  <span className="text-white/30">
+                    {t('summary', {
                       steps: stepCount,
                       latency: formatLatency(latency),
                       cost: cost || '—',
-                    })}</span>
+                    })}
                   </span>
                 </div>
-                {trace.langfuse_url && (
-                  <a
-                    href={trace.langfuse_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 text-purple-300 hover:text-purple-200 transition-colors"
+
+                <div className="flex items-center gap-3">
+                  {/* E2.3 — view toggle */}
+                  <div
+                    className="inline-flex rounded-md border border-white/10 bg-white/[0.03] overflow-hidden"
+                    role="tablist"
+                    aria-label="trace view"
                   >
-                    <ExternalLink className="w-3 h-3" />
-                    {t('openInLangfuse')}
-                  </a>
-                )}
+                    <button
+                      onClick={() => setView('tree')}
+                      role="tab"
+                      aria-selected={view === 'tree'}
+                      className={`flex items-center gap-1.5 px-2 py-1 transition-colors ${
+                        view === 'tree'
+                          ? 'bg-white/10 text-white/90'
+                          : 'text-white/50 hover:text-white/80'
+                      }`}
+                    >
+                      <GitBranch className="w-3 h-3" />
+                      {t('viewTree')}
+                    </button>
+                    <button
+                      onClick={() => setView('timeline')}
+                      role="tab"
+                      aria-selected={view === 'timeline'}
+                      className={`flex items-center gap-1.5 px-2 py-1 transition-colors border-l border-white/10 ${
+                        view === 'timeline'
+                          ? 'bg-white/10 text-white/90'
+                          : 'text-white/50 hover:text-white/80'
+                      }`}
+                    >
+                      <AlignLeft className="w-3 h-3" />
+                      {t('viewTimeline')}
+                    </button>
+                  </div>
+
+                  {trace.langfuse_url && (
+                    <a
+                      href={trace.langfuse_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 text-purple-300 hover:text-purple-200 transition-colors"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      {t('openInLangfuse')}
+                    </a>
+                  )}
+                </div>
               </div>
 
-              {/* The tree */}
+              {/* Body — tree or timeline, same data */}
               <div className="bg-black/20 border border-white/5 rounded-lg p-2 max-h-[28rem] overflow-y-auto">
-                {buildTree(trace.observations).map((node) => (
-                  <TreeRow key={node.id} node={node} depth={0} />
-                ))}
+                {view === 'tree' ? (
+                  buildTree(trace.observations).map((node) => (
+                    <TreeRow key={node.id} node={node} depth={0} />
+                  ))
+                ) : trace.observations.length === 0 ? (
+                  <p className="text-xs text-white/40 px-2 py-1">
+                    {t('timelineEmpty')}
+                  </p>
+                ) : (
+                  chronological(trace.observations).map((obs) => (
+                    <TimelineRow key={obs.id} obs={obs} />
+                  ))
+                )}
               </div>
             </>
           )}

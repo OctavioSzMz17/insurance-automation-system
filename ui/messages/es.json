@@ -132,6 +132,31 @@
       "reuploadDescription": "No tenemos el documento original guardado para este siniestro. Súbelo otra vez para que {brand} pueda re-analizarlo. Se guardará automáticamente para próximas revisiones.",
       "reuploadConfirm": "Subir y re-analizar"
     },
+    "stream": {
+      "connecting": "Conectando con {brand}…",
+      "thinking": "{brand} está pensando…",
+      "doneLabel": "Análisis completo",
+      "errorLabel": "Algo falló durante el análisis",
+      "pipelineStart": "Iniciando análisis",
+      "agentStartAnalyst": "El analista entró en acción",
+      "agentEndAnalyst": "Analista terminó",
+      "agentStartAuditor": "El auditor evalúa la decisión",
+      "agentEndAuditor": "Auditor terminó",
+      "agentDecision": "Decisión propuesta: {decision}",
+      "pipelineDone": "Listo · {latency}",
+      "tools": {
+        "extract_claim_from_pdf": "Leyendo el documento",
+        "get_user_by_id": "Buscando datos del cliente",
+        "get_policies_by_user_id": "Verificando pólizas vinculadas",
+        "evaluate_coverage_rules": "Aplicando reglas de cobertura",
+        "create_claim": "Registrando decisión",
+        "update_claim_status": "Actualizando estado del siniestro",
+        "get_claim_by_id": "Consultando el siniestro",
+        "list_claims": "Consultando la cola de siniestros",
+        "append_reasoning": "Añadiendo notas al expediente",
+        "default": "{name}"
+      }
+    },
     "trace": {
       "expand": "Ver árbol de razonamiento detallado",
       "collapse": "Ocultar árbol de razonamiento",
@@ -143,7 +168,10 @@
       "openInLangfuse": "Abrir en Langfuse",
       "tokensInOut": "{input} entrada · {output} salida",
       "noLatency": "—",
-      "stepLabel": "{name}"
+      "stepLabel": "{name}",
+      "viewTree": "Árbol",
+      "viewTimeline": "Línea de tiempo",
+      "timelineEmpty": "Sin pasos registrados."
     },
     "action": {
       "title": "Decisión del Adjuster",

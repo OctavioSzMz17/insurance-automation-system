@@ -39,6 +39,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import StreamingResponse
 
 _ORCH_ROOT     = Path(__file__).resolve().parents[1]
 _PROJECT_ROOT  = _ORCH_ROOT.parent
@@ -56,8 +57,13 @@ from packages.common.schemas.api import (  # noqa: E402
     TraceObservationItem,
 )
 
-from auth                  import Role, UserPrincipal, require_role  # noqa: E402
+from auth                  import (                                  # noqa: E402
+    Role, UserPrincipal, require_role,
+    decode_jwt, has_role_or_higher,
+)
 from routes.mcp_router      import MCPRouter, get_mcp_router          # noqa: E402
+# E1.3 — SSE streaming uses the same bus the agent_router publishes to.
+from observability.event_bus import get_event_bus                     # noqa: E402
 from validation             import (                                   # noqa: E402
     validate_approval_input,
     record_approval_action,
@@ -621,6 +627,128 @@ async def get_claim_trace(
         ended_at=None,  # Langfuse trace-level doesn't expose ended_at directly
         langfuse_url=langfuse_url,
         observations=observations,
+    )
+
+
+# ── GET /claims/stream/{request_id} (SSE, Phase E1.3) ────────────
+
+import json as _json_stream  # local alias — module already imports json elsewhere
+
+
+async def _verify_stream_token(
+    request: Request,
+    token_qs: str | None,
+) -> UserPrincipal:
+    """Validate JWT for the SSE endpoint.
+
+    `EventSource` (browser built-in) cannot send custom headers, so we
+    accept the token via `?token=...` query string as well as the
+    standard `Authorization: Bearer` header. Header wins when both
+    are present.
+    """
+    bearer = request.headers.get("authorization", "")
+    jwt_token: str | None = None
+    if bearer.lower().startswith("bearer "):
+        jwt_token = bearer[7:].strip()
+    if not jwt_token:
+        jwt_token = token_qs
+    if not jwt_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing token (Authorization header or ?token= query param)",
+        )
+
+    try:
+        payload = decode_jwt(jwt_token)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid token: {e}",
+        )
+
+    sub  = payload.get("sub")  or ""
+    role_str = payload.get("role") or ""
+    try:
+        role = Role(role_str)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Unknown role in token: {role_str!r}",
+        )
+    if not has_role_or_higher(role, Role.ANALYST):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Analyst role or higher required to subscribe",
+        )
+    return UserPrincipal(sub=sub, role=role)
+
+
+@router.get(
+    "/stream/{request_id}",
+    summary="Subscribe to Lía's live event stream for a request (SSE)",
+    description=(
+        "Server-Sent Events feed of pipeline events keyed by `request_id` "
+        "(set the same id as `X-Trace-Id` on the corresponding /submit-upload "
+        "or /reanalyze-upload). Each line is one `data: {json}` event; "
+        "stream ends on `pipeline.done` or `pipeline.error`. Requires "
+        "`analyst` role+. EventSource clients pass the JWT via `?token=` "
+        "since the browser API can't set Authorization headers."
+    ),
+    responses={
+        401: {"description": "Missing or invalid token"},
+        403: {"description": "Insufficient role"},
+    },
+)
+async def stream_claim_events(
+    request_id: str,
+    request:    Request,
+    token:      str | None = Query(
+        None,
+        description="JWT bearer token (for EventSource, which can't set headers)",
+    ),
+) -> StreamingResponse:
+    user = await _verify_stream_token(request, token)
+    logger.info(
+        f"GET /claims/stream/{request_id} | actor={user.sub} role={user.role.value}"
+    )
+
+    bus = get_event_bus()
+
+    async def event_generator():
+        # First chunk: an immediate keepalive so the browser knows the
+        # connection is established (some proxies buffer the first event).
+        yield ": connected\n\n"
+        try:
+            async for ev in bus.subscribe(request_id):
+                if ev is None:
+                    # Keepalive tick — SSE comments are ignored by the client.
+                    yield ": keepalive\n\n"
+                    continue
+                # SSE format: optional `event:` name, then `data:` payload.
+                ev_type = ev.get("type") or "message"
+                yield f"event: {ev_type}\ndata: {_json_stream.dumps(ev, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            # If the bus iterator dies, surface it and close out.
+            logger.warning(
+                f"GET /claims/stream/{request_id} | generator error: {e}"
+            )
+            err = {"type": "pipeline.error", "request_id": request_id,
+                   "data": {"error": str(e)}}
+            yield f"event: pipeline.error\ndata: {_json_stream.dumps(err)}\n\n"
+
+    headers = {
+        "Cache-Control":     "no-cache",
+        "Connection":        "keep-alive",
+        # Disable proxy buffering so events flush to the client immediately.
+        # Honoured by nginx ingress; ignored elsewhere.
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers=headers,
     )
 
 

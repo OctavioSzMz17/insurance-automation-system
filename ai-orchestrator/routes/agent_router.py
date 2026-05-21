@@ -53,7 +53,10 @@ from validation import (                                          # noqa: E402
 # Observability — D2.x. Returns a NoopTracer when Langfuse is not
 # configured, so this import is safe regardless of environment.
 sys.path.insert(0, str(_ROOT))  # ensure packages root is on sys.path
-from observability import get_tracer                              # noqa: E402
+from observability                  import get_tracer            # noqa: E402
+# E1.2 — live event publication for the SSE "Lía está pensando" UX.
+from observability.event_bus        import get_event_bus, make_event  # noqa: E402
+from observability.event_bus_callback import EventBusCallbackHandler  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -145,16 +148,38 @@ class AgentRouter:
                 **(trace_metadata or {}),
             },
         )
-        callbacks = [handler] if handler is not None else []
+        # E1.2 — also publish per-stage events to the in-memory bus so a
+        # browser EventSource can show "Lía está pensando…" live. Bus
+        # publishes are no-ops if session_id is missing (caller didn't
+        # opt in).
+        bus = get_event_bus()
+
+        def _emit(ev_type, **kw):
+            if session_id:
+                bus.publish(session_id, make_event(ev_type, session_id, **kw))
+
+        _emit(
+            "pipeline.start", stage="system",
+            data={"pdf_path": pdf_path, "persist": persist,
+                  "trace_name": trace_name or "claim-process"},
+        )
 
         # ── Stage 1: analyst ──────────────────────────────────────
+        analyst_cb = (
+            EventBusCallbackHandler(request_id=session_id, stage="analyst", bus=bus)
+            if session_id else None
+        )
+        analyst_callbacks = [c for c in (handler, analyst_cb) if c is not None]
+
+        _emit("agent.start", stage="analyst", name="AnalystAgent")
         a_start = time.perf_counter()
         try:
             a_state = await self.analyst_pipeline.run(
                 self.analyst,
-                {"pdf_path": pdf_path, "callbacks": callbacks},
+                {"pdf_path": pdf_path, "callbacks": analyst_callbacks},
             )
         except Exception as e:
+            _emit("pipeline.error", stage="analyst", data={"error": str(e)})
             return self._failed(
                 pdf_path,
                 stage="ANALYST_FAILED",
@@ -163,8 +188,13 @@ class AgentRouter:
                 total_ms=int((time.perf_counter() - t_start) * 1000),
             )
         analyst_ms = int((time.perf_counter() - a_start) * 1000)
+        _emit("agent.end", stage="analyst", name="AnalystAgent",
+              latency_ms=analyst_ms,
+              data={"retries": a_state.retry_count})
 
         if a_state.result is None or a_state.last_error:
+            _emit("pipeline.error", stage="analyst",
+                  data={"error": a_state.last_error or "no result"})
             return self._failed(
                 pdf_path,
                 stage="ANALYST_FAILED",
@@ -182,6 +212,13 @@ class AgentRouter:
         )
 
         # ── Stage 2: auditor ──────────────────────────────────────
+        auditor_cb = (
+            EventBusCallbackHandler(request_id=session_id, stage="auditor", bus=bus)
+            if session_id else None
+        )
+        auditor_callbacks = [c for c in (handler, auditor_cb) if c is not None]
+
+        _emit("agent.start", stage="auditor", name="AuditorAgent")
         u_start = time.perf_counter()
         try:
             u_state = await self.auditor_pipeline.run(
@@ -189,7 +226,7 @@ class AgentRouter:
                 {
                     "triage_report": triage_report,
                     "persist":       persist,
-                    "callbacks":     callbacks,
+                    "callbacks":     auditor_callbacks,
                 },
                 # validator context — keeps both checks honest:
                 #   triage_report → cross-reference fields
@@ -198,6 +235,7 @@ class AgentRouter:
                 persist=persist,
             )
         except Exception as e:
+            _emit("pipeline.error", stage="auditor", data={"error": str(e)})
             return self._failed(
                 pdf_path,
                 stage="AUDITOR_FAILED",
@@ -209,8 +247,13 @@ class AgentRouter:
                 total_ms=int((time.perf_counter() - t_start) * 1000),
             )
         auditor_ms = int((time.perf_counter() - u_start) * 1000)
+        _emit("agent.end", stage="auditor", name="AuditorAgent",
+              latency_ms=auditor_ms,
+              data={"retries": u_state.retry_count})
 
         if u_state.result is None or u_state.last_error:
+            _emit("pipeline.error", stage="auditor",
+                  data={"error": u_state.last_error or "no result"})
             return self._failed(
                 pdf_path,
                 stage="AUDITOR_FAILED",
@@ -231,6 +274,22 @@ class AgentRouter:
             "total_latency_ms=%d",
             u_state.retry_count, claim_decision.get("decision"),
             claim_decision.get("persisted_claim_id"), total_ms,
+        )
+
+        _emit(
+            "agent.decision", stage="auditor", name="AuditorAgent",
+            data={
+                "decision":          claim_decision.get("decision"),
+                "persisted_claim_id": claim_decision.get("persisted_claim_id"),
+                "severity_label":    triage_report.get("severity_label"),
+            },
+        )
+        _emit(
+            "pipeline.done", stage="system", latency_ms=total_ms,
+            data={
+                "decision":          claim_decision.get("decision"),
+                "persisted_claim_id": claim_decision.get("persisted_claim_id"),
+            },
         )
 
         # Flush so the trace lands in Langfuse before the request returns.

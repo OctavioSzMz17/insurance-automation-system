@@ -172,16 +172,26 @@ export async function getClaimDetail(claimId: number): Promise<Claim> {
   return res.data;
 }
 
-export async function submitClaim(pdf: File): Promise<ClaimSubmitResponse> {
+export async function submitClaim(
+  pdf:     File,
+  traceId?: string,
+): Promise<ClaimSubmitResponse> {
   const fd = new FormData();
   fd.append('pdf', pdf);
   // Override Content-Type so axios sets the multipart boundary.
   // Auth header attached automatically by the request interceptor.
+  // When `traceId` is passed, it overrides the middleware-generated id —
+  // lets the UI open `/claims/stream/{traceId}` in parallel and correlate
+  // events with this exact submission.
+  const headers: Record<string, string> = {
+    'Content-Type': 'multipart/form-data',
+  };
+  if (traceId) headers['X-Trace-Id'] = traceId;
   const res = await api.post<ClaimSubmitResponse>(
     '/claims/submit-upload',
     fd,
     {
-      headers: { 'Content-Type': 'multipart/form-data' },
+      headers,
       // PDF processing can be slow when the LLM is cold
       timeout: 120_000,
     },

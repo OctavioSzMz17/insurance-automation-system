@@ -132,6 +132,31 @@
       "reuploadDescription": "We don't have the original document stored for this claim. Upload it again so {brand} can re-analyze it. It will be saved automatically for future reviews.",
       "reuploadConfirm": "Upload and re-analyze"
     },
+    "stream": {
+      "connecting": "Connecting to {brand}…",
+      "thinking": "{brand} is thinking…",
+      "doneLabel": "Analysis complete",
+      "errorLabel": "Something went wrong during analysis",
+      "pipelineStart": "Starting analysis",
+      "agentStartAnalyst": "Analyst stepped in",
+      "agentEndAnalyst": "Analyst finished",
+      "agentStartAuditor": "Auditor reviewing the decision",
+      "agentEndAuditor": "Auditor finished",
+      "agentDecision": "Proposed decision: {decision}",
+      "pipelineDone": "Done · {latency}",
+      "tools": {
+        "extract_claim_from_pdf": "Reading the document",
+        "get_user_by_id": "Looking up customer data",
+        "get_policies_by_user_id": "Checking linked policies",
+        "evaluate_coverage_rules": "Applying coverage rules",
+        "create_claim": "Recording the decision",
+        "update_claim_status": "Updating claim status",
+        "get_claim_by_id": "Querying the claim",
+        "list_claims": "Querying the claim queue",
+        "append_reasoning": "Appending notes to the file",
+        "default": "{name}"
+      }
+    },
     "trace": {
       "expand": "Show detailed reasoning tree",
       "collapse": "Hide reasoning tree",
@@ -143,7 +168,10 @@
       "openInLangfuse": "Open in Langfuse",
       "tokensInOut": "{input} in · {output} out",
       "noLatency": "—",
-      "stepLabel": "{name}"
+      "stepLabel": "{name}",
+      "viewTree": "Tree",
+      "viewTimeline": "Timeline",
+      "timelineEmpty": "No steps recorded."
     },
     "action": {
       "title": "Adjuster Decision",
