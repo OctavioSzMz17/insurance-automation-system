@@ -85,6 +85,7 @@ from validation             import (                                   # noqa: E
     record_approval_action,
     http_status_for,
 )
+from config                 import get_settings                        # noqa: E402
 
 logger = logging.getLogger(__name__)
 router  = APIRouter(prefix="/claims", tags=["claims"])

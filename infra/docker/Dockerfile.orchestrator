@@ -54,9 +54,12 @@ COPY --from=builder /install /usr/local
 # imports their tool functions in-process via core/tools/_loader.py
 # (Phase B+C). Once we switch to SSE clients (later), this can shrink.
 COPY packages/common              ./packages/common
+COPY mcp-servers/_common          ./mcp-servers/_common
 COPY mcp-servers/legacy-provider  ./mcp-servers/legacy-provider
 COPY mcp-servers/documents        ./mcp-servers/documents
 COPY mcp-servers/claims           ./mcp-servers/claims
+COPY mcp-servers/policies         ./mcp-servers/policies
+COPY mcp-servers/users            ./mcp-servers/users
 COPY ai-orchestrator              ./ai-orchestrator
 COPY observability                ./observability
 
