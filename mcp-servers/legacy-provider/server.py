@@ -31,8 +31,7 @@ from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
-from starlette.requests import Request
-from starlette.routing import Mount, Route
+from starlette.routing import Mount
 import mcp.types as types
 
 from _common.auth import MCPAuthMiddleware  # Master Patch Part 1
@@ -106,10 +105,8 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
 sse_transport = SseServerTransport("/messages/")
 
 
-async def handle_sse(request: Request) -> None:
-    async with sse_transport.connect_sse(
-        request.scope, request.receive, request._send
-    ) as streams:
+async def handle_sse(scope: Any, receive: Any, send: Any) -> None:
+    async with sse_transport.connect_sse(scope, receive, send) as streams:
         await server.run(streams[0], streams[1], server.create_initialization_options())
 
 
@@ -117,7 +114,7 @@ starlette_app = Starlette(
     debug=False,
     middleware=[Middleware(MCPAuthMiddleware)],  # Master Patch Part 1
     routes=[
-        Route("/sse", endpoint=handle_sse),
+        Mount("/sse", app=handle_sse),
         Mount("/messages", app=sse_transport.handle_post_message),
     ],
 )
