@@ -53,6 +53,14 @@ from routes import users  as users_routes             # noqa: E402
 from middleware.trace_id        import TraceIdMiddleware     # noqa: E402
 from observability.logging      import configure_logging     # noqa: E402
 from observability.event_bus    import get_event_bus         # noqa: E402
+# Master Patch Part 2 — bounded, thread-safe request-owner registry.
+from auth.request_owners        import RequestOwnerRegistry  # noqa: E402
+# Master Patch Part 4 — bounded, per-sub-quota stream-ticket store.
+from auth.stream_tickets        import StreamTicketStore     # noqa: E402
+# Fix A — optional Redis client for shared state across replicas.
+from auth.redis_client          import create_redis_client   # noqa: E402
+# Fix D — inject Redis into approval validator at startup.
+from validation                 import configure_approval_redis  # noqa: E402
 
 
 # ── Logging — D3.1 ──────────────────────────────────────────────
@@ -78,6 +86,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.environment, settings.llm_provider, settings.model_name,
     )
 
+    # Fix A — initialise Redis client (None when REDIS_URL is not set).
+    redis_client = await create_redis_client(settings.redis_url)
+    app.state.redis = redis_client
+    if redis_client is not None:
+        logger.info("Redis connected | url=<redacted> backend=shared-state")
+    else:
+        logger.warning(
+            "REDIS_URL not set — ownership/ticket stores running in-memory "
+            "(single-replica only; set REDIS_URL for multi-replica deployments)"
+        )
+
     try:
         app.state.mcp_router = MCPRouter()
         logger.info("MCPRouter ready")
@@ -99,9 +118,40 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.event_bus = bus
     logger.info("EventBus ready (gc=on)")
 
+    # Master Patch Part 4 — bounded, thread-safe stream-ticket store.
+    # Eradicates the plain dict that allowed unbounded growth + O(N)
+    # sweep amplification. Per-sub quota blocks single-credential
+    # mint floods.
+    # Fix D — wire Redis into the approval validator module-level client.
+    configure_approval_redis(redis_client)
+    logger.info("ApprovalValidators Redis configured")
+
+    # Fix A — pass Redis client so stores are shared across replicas.
+    app.state.stream_tickets = StreamTicketStore(
+        maxsize=10_000,
+        ttl_seconds=30,
+        max_per_sub=20,
+        redis_client=redis_client,
+    )
+    logger.info("StreamTicketStore ready (maxsize=10000 ttl=30s per_sub=20)")
+
+    # Master Patch Part 2 + Fix A — ownership registry backed by Redis
+    # when available so cross-replica tenant isolation is enforced.
+    app.state.request_owners = RequestOwnerRegistry(
+        maxsize=10_000,
+        ttl_seconds=3600,
+        redis_client=redis_client,
+    )
+    logger.info("RequestOwnerRegistry ready (maxsize=10000 ttl=3600s)")
+
     yield
 
     bus.stop_gc()
+
+    # Fix A — close Redis connection cleanly on shutdown.
+    if redis_client is not None:
+        await redis_client.aclose()
+        logger.info("Redis connection closed")
 
     logger.info("Orchestrator shutting down")
     app.state.agent_router = None

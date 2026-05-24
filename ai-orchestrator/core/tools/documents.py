@@ -1,12 +1,11 @@
-"""LangChain @tool wrappers for the Documents MCP server.
+"""LangChain @tool wrapper for the Documents MCP server.
 
-Thin async wrappers that expose the documents MCP functions to LangGraph
-agents. Phase B uses direct in-process calls (via the importlib loader);
-Phase C swaps to SSE clients.
+Fix 1 (Rule 7): calls the documents MCP over SSE instead of in-process.
 
 Rules applied:
     Rule 3  — Read-only domain (PDF parsing)
-    Rule 11 — Type hints; structured outputs returned as JSON-safe dicts
+    Rule 7  — Out-of-process SSE call; no in-process imports
+    Rule 11 — Type hints throughout
 """
 
 from __future__ import annotations
@@ -16,12 +15,9 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from ._loader import load_mcp_tool
+from ..mcp_client import call_mcp_tool
 
 logger = logging.getLogger(__name__)
-
-# Bind the underlying MCP tool function once at import time
-_extract_claim_from_pdf = load_mcp_tool("documents", "extract_claim_from_pdf")
 
 
 @tool
@@ -37,8 +33,14 @@ async def extract_claim_from_pdf(pdf_path: str) -> dict[str, Any]:
     Args:
         pdf_path: Absolute filesystem path to the PDF file.
     """
+    from config import get_settings
     logger.info(f"@tool extract_claim_from_pdf | pdf_path={pdf_path}")
-    return await _extract_claim_from_pdf(pdf_path)
+    settings = get_settings()
+    return await call_mcp_tool(
+        settings.documents_mcp_url,
+        "extract_claim_from_pdf",
+        {"pdf_path": pdf_path},
+    )
 
 
 DOCUMENTS_TOOLS = [extract_claim_from_pdf]

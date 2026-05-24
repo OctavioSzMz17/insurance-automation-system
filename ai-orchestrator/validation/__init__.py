@@ -24,6 +24,7 @@ from .approval_validators import (
     record_approval_action,
     http_status_for,
     reset_caches,
+    configure_redis as configure_approval_redis,
 )
 
 __all__ = [
@@ -41,4 +42,5 @@ __all__ = [
     "record_approval_action",
     "http_status_for",
     "reset_caches",
+    "configure_approval_redis",
 ]

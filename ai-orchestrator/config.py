@@ -46,6 +46,35 @@ class Settings(BaseSettings):
     #              directly — Rule 2)
     database_url: str = Field(default="", alias="DATABASE_URL")
 
+    # ── MCP server SSE endpoints (Rule 7 — all MCP comms over SSE) ─
+    # Defaults point to localhost ports for direct-run dev.
+    # Docker/K8s override these with container-network URLs via .env.
+    users_mcp_url:    str = Field(default="http://localhost:8004/sse", alias="MCP_USERS_URL")
+    policies_mcp_url: str = Field(default="http://localhost:8003/sse", alias="MCP_POLICIES_URL")
+    claims_mcp_url:   str = Field(default="http://localhost:8002/sse", alias="MCP_CLAIMS_URL")
+    documents_mcp_url:str = Field(default="http://localhost:8005/sse", alias="MCP_DOCUMENTS_URL")
+    legacy_mcp_url:   str = Field(default="http://localhost:8006/sse", alias="MCP_LEGACY_URL")
+
+    # ── Redis (Fix A — shared state across replicas) ──────────────
+    # When set, ownership registry, stream tickets, and approval
+    # idempotency/rate-limit caches use Redis instead of in-process
+    # TTLCache/dicts. Required for multi-replica deployments.
+    # If absent, falls back to in-memory (single-replica / dev only).
+    redis_url: str = Field(default="", alias="REDIS_URL")
+
+    # Master Patch Part 1 — shared HMAC secret for MCP transport auth.
+    # Validated by every MCP server's MCPAuthMiddleware before the SSE
+    # upgrade. Generate with: openssl rand -hex 32 (>=32 chars required).
+    # Closes the post-Fix-1 gap where MCP servers accepted any HTTP client.
+    mcp_shared_secret: str = Field(default="", alias="MCP_SHARED_SECRET")
+
+    # Master Patch Part 3 — HMAC-SHA256 key for signing trace_id markers
+    # written into claims.ai_reasoning. The orchestrator signs every
+    # marker before persistence; the claims MCP's append_reasoning tool
+    # rejects any caller-controlled text containing unsigned markers,
+    # closing the audit-trail spoofing vector. >=32 chars required.
+    proposal_signing_key: str = Field(default="", alias="PROPOSAL_SIGNING_KEY")
+
     # ── Agent / pipeline ──────────────────────────────────────────
     max_retry_attempts: int = Field(default=3, alias="MAX_RETRY_ATTEMPTS")
 

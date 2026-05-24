@@ -33,14 +33,11 @@ sys.path.insert(0, str(Path(__file__).parents[3]))
 from db import get_engine                                    # noqa: E402
 from packages.common.schemas.claim import ClaimCreateSchema  # noqa: E402
 
-# D5.1 — read the request-scoped trace_id so we can stamp it into
-# ai_reasoning. Optional import: if observability isn't on the path
-# (older deployments, tests), we just skip stamping.
-try:
-    from observability.correlation import get_trace_id        # noqa: E402
-except Exception:                                              # pragma: no cover
-    def get_trace_id():  # type: ignore[no-redef]
-        return None
+# Master Patch Part 3 — trace-marker stamping is now the orchestrator's
+# responsibility (signed with HMAC-SHA256 via packages.common.trace_signing).
+# The legacy unsigned-marker prepended here was forgeable by any caller
+# of this MCP and has been removed. The orchestrator pre-prepends a
+# signed marker to `ai_reasoning` before it crosses the MCP boundary.
 
 # Import write_restricted via direct file load so this module works both
 # as a package (mcp server entry point) and as a standalone module
@@ -85,14 +82,11 @@ async def create_claim(claim_data: dict[str, Any]) -> dict[str, Any]:
         logger.error(f"create_claim validation failed | error={e}")
         raise ValueError(f"Invalid claim_data: {e}") from e
 
-    # D5.1 — prepend a [trace_id: ...] marker so /claims/{id}/trace can
-    # later find this claim's Langfuse session. Same tag format used by
-    # the existing audit markers ([RECOMMENDED: ...], [MANUAL OVERRIDE …]).
-    # UI parser strips the marker before rendering — invisible to adjusters.
+    # Master Patch Part 3 — no marker stamping here. The orchestrator
+    # pre-prepends a signed [trace_id: TID.SIG] marker to ai_reasoning
+    # before calling this tool. Whatever validated.ai_reasoning contains
+    # is what gets persisted, unchanged.
     ai_reasoning_to_persist = validated.ai_reasoning
-    _trace = get_trace_id()
-    if _trace:
-        ai_reasoning_to_persist = f"[trace_id: {_trace}]\n\n{validated.ai_reasoning}"
 
     # Layer 2: write (DB constraints + triggers enforce final guarantees)
     try:

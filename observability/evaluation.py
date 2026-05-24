@@ -43,6 +43,7 @@ for p in (str(_ROOT), str(_ORCH), str(_ORCH / "agents")):
 _GOLDEN = _HERE / "evals" / "golden"
 
 logger = logging.getLogger("evaluation")
+report_logger = logging.getLogger("evaluation.report")
 
 
 # ── Data shapes ──────────────────────────────────────────────────
@@ -217,16 +218,18 @@ async def run_all(case_filter: Optional[str] = None) -> list[CaseResult]:
     if case_filter:
         cases = [c for c in cases if c.case_id == case_filter]
     if not cases:
-        print(f"No cases matched (filter={case_filter!r}).", file=sys.stderr)
+        logger.warning("No cases matched | filter=%r", case_filter)
         return []
-    print(f"Running {len(cases)} eval(s) against current prompts")
-    print("─" * 60)
+    logger.info("Running %d eval(s) against current prompts", len(cases))
+    logger.info("%s", "─" * 60)
     results: list[CaseResult] = []
     for c in cases:
-        print(f"  → {c.case_id} ({c.name})...", flush=True)
+        logger.info("Running case | case_id=%s name=%s", c.case_id, c.name)
         r = await run_case(c)
-        mark = "✅" if r.passed else "❌"
-        print(f"    {mark} ({r.latency_ms} ms)")
+        logger.info(
+            "Case result | case_id=%s passed=%s latency_ms=%d",
+            c.case_id, r.passed, r.latency_ms,
+        )
         results.append(r)
     return results
 
@@ -235,41 +238,41 @@ async def run_all(case_filter: Optional[str] = None) -> list[CaseResult]:
 
 def print_report(results: list[CaseResult]) -> None:
     if not results:
-        print("\nNo results.")
+        report_logger.info("No results.")
         return
-    print()
-    print("=" * 60)
+    report_logger.info("=" * 60)
     total          = len(results)
     decision_ok    = sum(1 for r in results if r.decision_match)
     severity_ok    = sum(1 for r in results if r.severity_match)
     passed         = sum(1 for r in results if r.passed)
     avg_latency_ms = sum(r.latency_ms for r in results) / total
     pct            = 100.0 * passed / total
-    print(f"DECISION ACCURACY:  {decision_ok}/{total}")
-    print(f"SEVERITY ACCURACY:  {severity_ok}/{total}")
-    print(f"OVERALL PASSED:     {passed}/{total} ({pct:.1f}%)")
-    print(f"AVG LATENCY:        {avg_latency_ms/1000:.1f}s")
+    report_logger.info("DECISION ACCURACY | value=%d/%d", decision_ok, total)
+    report_logger.info("SEVERITY ACCURACY | value=%d/%d", severity_ok, total)
+    report_logger.info("OVERALL PASSED | value=%d/%d pct=%.1f", passed, total, pct)
+    report_logger.info("AVG LATENCY | seconds=%.1f", avg_latency_ms / 1000.0)
 
     failed = [r for r in results if not r.passed]
     if failed:
-        print()
-        print("FAILURES:")
-        print("-" * 60)
+        report_logger.warning("FAILURES")
+        report_logger.warning("%s", "-" * 60)
         for r in failed:
-            print(f"❌ {r.case_id} ({r.name})")
+            report_logger.warning("Case failed | case_id=%s name=%s", r.case_id, r.name)
             if r.error:
-                print(f"    pipeline error: {r.error}")
+                report_logger.warning("pipeline_error=%s", r.error)
                 continue
             if not r.decision_match:
-                print(
-                    f"    decision: expected → actual = {r.actual_decision!r}"
+                report_logger.warning(
+                    "decision_mismatch | actual_decision=%r",
+                    r.actual_decision,
                 )
             if not r.severity_match:
-                print(
-                    f"    severity: expected → actual = {r.actual_severity!r}"
+                report_logger.warning(
+                    "severity_mismatch | actual_severity=%r",
+                    r.actual_severity,
                 )
             for f in r.flag_failures:
-                print(f"    {f}")
+                report_logger.warning("flag_failure=%s", f)
 
 
 # ── CLI ──────────────────────────────────────────────────────────
@@ -301,14 +304,19 @@ def cli() -> None:
     if args.cmd == "list":
         for c in load_cases():
             exp = c.expected
-            print(f"  {c.case_id}: {c.name}")
-            print(f"    expect: decision={exp.decision} severity={exp.severity}")
+            logger.info(
+                "Case | case_id=%s name=%s expected_decision=%s expected_severity=%s",
+                c.case_id, c.name, exp.decision, exp.severity,
+            )
         return
 
     if args.cmd == "run":
         results = asyncio.run(run_all(args.case))
         if args.json:
-            print(json.dumps([asdict(r) for r in results], indent=2, default=str))
+            logger.info(
+                "Eval JSON results | payload=%s",
+                json.dumps([asdict(r) for r in results], indent=2, default=str),
+            )
         else:
             print_report(results)
         # Non-zero exit if anything failed — useful for CI later.

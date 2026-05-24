@@ -17,17 +17,20 @@ Rules applied:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
+import time
 import uuid
+from collections import Counter
 from pathlib import Path
+from threading import Lock
 from typing import Optional
 
 _ORCH_ROOT_FOR_OBS    = Path(__file__).resolve().parents[1]
 _PROJECT_ROOT_FOR_OBS = _ORCH_ROOT_FOR_OBS.parent
 sys.path.insert(0, str(_PROJECT_ROOT_FOR_OBS))
-from observability.correlation import get_trace_id  # noqa: E402
 
 from fastapi import (
     APIRouter,
@@ -53,14 +56,27 @@ from packages.common.schemas.api import (  # noqa: E402
     ClaimListResponse,
     ClaimApproveRequest,
     ClaimRejectRequest,
+    ClaimConfirmRequest,
+    ClaimConfirmResponse,
     ClaimTraceResponse,
+    StreamTicketResponse,
     TraceObservationItem,
+)
+
+# Master Patch Part 3 — HMAC-signed trace markers (audit-trail integrity).
+from packages.common.trace_signing import (  # noqa: E402
+    extract_verified_trace_ids,
+    sign_trace_marker,
 )
 
 from auth                  import (                                  # noqa: E402
     Role, UserPrincipal, require_role,
-    decode_jwt, has_role_or_higher,
 )
+# Master Patch Part 4 — bounded stream-ticket store + quota exception.
+from auth.stream_tickets    import (                                  # noqa: E402
+    StreamTicket, StreamTicketStore, TicketQuotaExceeded,
+)
+from core.mcp_client        import MCPClientError                     # noqa: E402
 from routes.mcp_router      import MCPRouter, get_mcp_router          # noqa: E402
 # E1.3 — SSE streaming uses the same bus the agent_router publishes to.
 from observability.event_bus import get_event_bus                     # noqa: E402
@@ -72,6 +88,48 @@ from validation             import (                                   # noqa: E
 
 logger = logging.getLogger(__name__)
 router  = APIRouter(prefix="/claims", tags=["claims"])
+
+
+# ── Fix B — pdf_path boundary guard ─────────────────────────────
+
+def _assert_pdf_path_safe(pdf_path: str) -> None:
+    """Raise HTTP 400 if pdf_path resolves outside _UPLOAD_DIR.
+
+    Defence-in-depth layer that runs after the Pydantic schema validator
+    (which already rejects '..', null bytes, and relative paths). This
+    check catches OS-level symlink attacks and any platform-specific path
+    representation that slips past the schema layer.
+
+    Only applies to POST /claims/submit (JSON body path). The upload
+    endpoints (/submit-upload, /reanalyze-upload) generate the path
+    server-side and are not affected.
+
+    Args:
+        pdf_path: The validated string from ClaimSubmitRequest.
+
+    Raises:
+        HTTPException 400: Path resolves outside CLAIM_UPLOAD_DIR.
+    """
+    try:
+        resolved = Path(pdf_path).resolve()
+        allowed  = _UPLOAD_DIR.resolve()
+        if not str(resolved).startswith(str(allowed)):
+            logger.warning(
+                "pdf_path boundary violation | path=%s resolved=%s allowed=%s",
+                pdf_path, resolved, allowed,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="pdf_path must point to a file inside the upload directory",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("pdf_path validation error | path=%s err=%r", pdf_path, exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="pdf_path is invalid",
+        )
 
 
 # ── POST /claims/submit ──────────────────────────────────────────
@@ -94,14 +152,26 @@ async def submit_claim(
     mcp_router: MCPRouter     = Depends(get_mcp_router),
 ) -> ClaimSubmitResponse:
     """Run the full agent pipeline for a single claim PDF."""
-    # D2.4 — reuse the trace_id the middleware bound to this request.
-    # Falls back to a fresh UUID only when called outside the FastAPI
-    # request scope (tests, scripts).
-    request_id = get_trace_id() or str(uuid.uuid4())
+    # Fix A — always generate a server-side UUID4 as the pipeline id.
+    # The X-Trace-Id header (observability) is intentionally NOT used here
+    # — it is client-controllable and must never be a security principal key.
+    request_id = str(uuid.uuid4())
     logger.info(
         f"POST /claims/submit | request_id={request_id} actor={user.sub} "
         f"role={user.role.value} pdf_path={body.pdf_path}"
     )
+
+    # Fix B — defence-in-depth: even after the Pydantic validator rejects
+    # '..' and relative paths, confirm the resolved path is inside the
+    # allowed upload directory. This catches symlink attacks and any edge
+    # case the schema validator might miss on different OS path flavours.
+    _assert_pdf_path_safe(body.pdf_path)
+
+    # Master Patch Part 2 — record ownership BEFORE the pipeline starts.
+    # The SSE stream-ticket mint endpoint will consult this registry to
+    # reject cross-user stream hijack attempts. Done first so a fast
+    # subscriber can connect mid-pipeline without a TOCTOU window.
+    await _bind_request_owner(request, request_id, user)
 
     agent_router = getattr(request.app.state, "agent_router", None)
     if agent_router is None:
@@ -125,25 +195,59 @@ async def submit_claim(
     summary: str | None = None
     if result.claim_decision:
         recommendation = result.claim_decision.get("decision")
-        persisted_id   = result.claim_decision.get("persisted_claim_id")
     if result.triage_report:
         summary = result.triage_report.get("summary")
 
-    # After C1.5, the persisted row should be AWAITING_INPUT until a human
-    # confirms via /approve or /reject. Verify by going through the MCP router.
-    if persisted_id is not None:
-        try:
-            persisted = await mcp_router.call(
-                "claims", "get_claim_by_id",
-                caller_role=user.role,
-                claim_id=persisted_id,
+    # Rule 6 — HITL gate: orchestrator (deterministic code) inserts the claim
+    # row with AWAITING_INPUT. The agent never calls create_claim directly.
+    if result.pipeline_status == "SUCCESS" and result.claim_decision:
+        dec = result.claim_decision
+
+        # Master Patch Part 2 — block insider fraud where an employee
+        # with low role privilege submits a PDF whose `Asegurado: ID:`
+        # line names another customer. If the JWT actor's identity
+        # does not match the email on the target user_id, refuse to
+        # persist. ADMINs are exempt for ops / backfill scenarios.
+        target_uid = dec.get("user_id")
+        if isinstance(target_uid, int):
+            await _assert_actor_may_submit_for(
+                user=user, target_user_id=target_uid,
+                mcp_router=mcp_router, request_id=request_id,
             )
-            claim_status_persisted = persisted.get("claim_status")
-        except Exception as e:
-            logger.warning(
-                f"POST /claims/submit | could not re-read persisted claim "
-                f"{persisted_id}: {e}"
+
+        if dec.get("policy_id") is not None:
+            # Master Patch Part 3 — sign the trace marker on the
+            # orchestrator side (where PROPOSAL_SIGNING_KEY lives) and
+            # prepend it to ai_reasoning BEFORE it crosses the MCP
+            # boundary. The claims MCP can no longer mint markers itself.
+            signed_reasoning = (
+                f"{sign_trace_marker(request_id)}\n\n{dec['ai_reasoning']}"
+                if request_id else dec["ai_reasoning"]
             )
+            try:
+                created = await mcp_router.call(
+                    "claims", "create_claim",
+                    internal=True,  # orchestrator-initiated, not user-driven
+                    user_id=dec["user_id"],
+                    policy_id=dec["policy_id"],
+                    incident_date=dec["incident_date"],
+                    incident_description=dec["incident_description"],
+                    incident_location=dec.get("incident_location"),
+                    severity_label=dec["severity_label"],
+                    reported_damage_amount=(
+                        str(dec["reported_damage_amount"])
+                        if dec.get("reported_damage_amount") else None
+                    ),
+                    claim_status="AWAITING_INPUT",
+                    ai_reasoning=signed_reasoning,
+                )
+                persisted_id = created.get("claim_id")
+                claim_status_persisted = "AWAITING_INPUT"
+            except Exception as e:
+                logger.error(
+                    f"POST /claims/submit | create_claim failed | "
+                    f"request_id={request_id} err={e}"
+                )
 
     logger.info(
         f"POST /claims/submit done | request_id={request_id} actor={user.sub} "
@@ -209,11 +313,17 @@ async def submit_claim_upload(
     mcp_router: MCPRouter     = Depends(get_mcp_router),
 ) -> ClaimSubmitResponse:
     """Upload a PDF and run the full agent pipeline against it."""
-    request_id = get_trace_id() or str(uuid.uuid4())
+    # Fix A — server-side UUID4; never derived from X-Trace-Id.
+    request_id = str(uuid.uuid4())
     logger.info(
         f"POST /claims/submit-upload | request_id={request_id} actor={user.sub} "
         f"role={user.role.value} filename={pdf.filename}"
     )
+
+    # Master Patch Part 2 — bind ownership immediately so the SSE stream
+    # subscriber path can enforce tenant isolation, even before we've
+    # validated the upload payload.
+    await _bind_request_owner(request, request_id, user)
 
     # ── Validate ─────────────────────────────────────────────
     if not pdf.filename or not pdf.filename.lower().endswith(".pdf"):
@@ -288,9 +398,53 @@ async def submit_claim_upload(
     summary: str | None = None
     if result.claim_decision:
         recommendation = result.claim_decision.get("decision")
-        persisted_id   = result.claim_decision.get("persisted_claim_id")
     if result.triage_report:
         summary = result.triage_report.get("summary")
+
+    # Rule 6 — HITL gate: orchestrator inserts AWAITING_INPUT, not the agent.
+    if result.pipeline_status == "SUCCESS" and result.claim_decision:
+        dec = result.claim_decision
+
+        # Master Patch Part 2 — same insider-fraud guard as /submit.
+        # Refuse to persist a claim whose target user_id does not belong
+        # to the JWT actor's identity (admins exempt).
+        target_uid = dec.get("user_id")
+        if isinstance(target_uid, int):
+            await _assert_actor_may_submit_for(
+                user=user, target_user_id=target_uid,
+                mcp_router=mcp_router, request_id=request_id,
+            )
+
+        if dec.get("policy_id") is not None:
+            # Master Patch Part 3 — same signed-marker stamping as /submit.
+            signed_reasoning = (
+                f"{sign_trace_marker(request_id)}\n\n{dec['ai_reasoning']}"
+                if request_id else dec["ai_reasoning"]
+            )
+            try:
+                created = await mcp_router.call(
+                    "claims", "create_claim",
+                    internal=True,
+                    user_id=dec["user_id"],
+                    policy_id=dec["policy_id"],
+                    incident_date=dec["incident_date"],
+                    incident_description=dec["incident_description"],
+                    incident_location=dec.get("incident_location"),
+                    severity_label=dec["severity_label"],
+                    reported_damage_amount=(
+                        str(dec["reported_damage_amount"])
+                        if dec.get("reported_damage_amount") else None
+                    ),
+                    claim_status="AWAITING_INPUT",
+                    ai_reasoning=signed_reasoning,
+                )
+                persisted_id = created.get("claim_id")
+                claim_status_persisted = "AWAITING_INPUT"
+            except Exception as e:
+                logger.error(
+                    f"POST /claims/submit-upload | create_claim failed | "
+                    f"request_id={request_id} err={e}"
+                )
 
     if persisted_id is not None:
         # Rename the staged PDF so it can be looked up by claim_id later
@@ -306,19 +460,6 @@ async def submit_claim_upload(
         except Exception as e:
             logger.warning(
                 f"POST /claims/submit-upload | could not rename PDF for "
-                f"claim {persisted_id}: {e}"
-            )
-
-        try:
-            persisted = await mcp_router.call(
-                "claims", "get_claim_by_id",
-                caller_role=user.role,
-                claim_id=persisted_id,
-            )
-            claim_status_persisted = persisted.get("claim_status")
-        except Exception as e:
-            logger.warning(
-                f"POST /claims/submit-upload | could not re-read persisted "
                 f"claim {persisted_id}: {e}"
             )
 
@@ -388,8 +529,17 @@ async def list_claims_endpoint(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
+    except MCPClientError as e:
+        # Master Patch Part 4 — internal detail to logs only.
+        logger.error(
+            "GET /claims upstream failure | internal=%s", e.internal,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=e.public,
+        )
     except RuntimeError as e:
-        logger.error(f"GET /claims DB error: {e}")
+        logger.error(f"GET /claims DB error: {e!r}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal error listing claims",
@@ -441,8 +591,16 @@ async def get_claim_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Claim {claim_id} not found",
         )
+    except MCPClientError as e:
+        logger.error(
+            "GET /claims/%s upstream failure | internal=%s",
+            claim_id, e.internal, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=e.public,
+        )
     except RuntimeError as e:
-        logger.error(f"GET /claims/{claim_id} DB error: {e}")
+        logger.error(f"GET /claims/{claim_id} DB error: {e!r}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal error retrieving claim",
@@ -453,22 +611,19 @@ async def get_claim_status(
 
 # ── GET /claims/{claim_id}/trace (D5.1) ──────────────────────────
 
-# Markers look like: [trace_id: 0d24-...]   (whitespace tolerant)
-_TRACE_ID_MARKER_RE = __import__("re").compile(
-    r"\[\s*trace_id\s*:\s*([A-Za-z0-9._\-]+)\s*\]"
-)
-
-
+# Master Patch Part 3 — _extract_trace_ids now returns ONLY verified
+# (HMAC-SHA256-signed) markers. Unsigned legacy markers are silently
+# dropped — fail-safe: the UI sees "no trace" rather than a spoofable
+# pointer to an attacker-chosen Langfuse session.
 def _extract_trace_ids(ai_reasoning: Optional[str]) -> list[str]:
-    """Return every [trace_id: ...] marker in the text, oldest first.
+    """Return every verified [trace_id: TID.SIG] marker, oldest first.
 
-    `create_claim` prepends one at submit time; each re-analysis appends
-    another. Order in the string IS the chronological order, so the
-    last element is the most recent run.
+    Order in the string IS the chronological order, so the last element
+    is the most recent (re-)analysis. Markers that do not verify under
+    the current PROPOSAL_SIGNING_KEY are dropped, defeating audit-trail
+    spoofing via append_reasoning.
     """
-    if not ai_reasoning:
-        return []
-    return _TRACE_ID_MARKER_RE.findall(ai_reasoning)
+    return extract_verified_trace_ids(ai_reasoning)
 
 
 def _shape_observation(o: dict) -> TraceObservationItem:
@@ -530,6 +685,14 @@ async def get_claim_trace(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Claim {claim_id} not found",
+        )
+    except MCPClientError as e:
+        logger.error(
+            "GET /claims/%s/trace upstream failure | internal=%s",
+            claim_id, e.internal, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=e.public,
         )
 
     # 2) Pick the most recent trace_id marker.
@@ -630,88 +793,402 @@ async def get_claim_trace(
     )
 
 
-# ── GET /claims/stream/{request_id} (SSE, Phase E1.3) ────────────
+# ── SSE stream-ticket plumbing (Fix 3 + Master Patch Part 4) ────
 
 import json as _json_stream  # local alias — module already imports json elsewhere
 
+# Authoritative TTL — must match StreamTicketStore configured in app.py.
+# Kept here for log messages / Retry-After headers only; the store owns
+# the actual TTL enforcement.
+_TICKET_TTL_SECONDS: int = 30
 
-async def _verify_stream_token(
-    request: Request,
-    token_qs: str | None,
-) -> UserPrincipal:
-    """Validate JWT for the SSE endpoint.
+# ── Master Patch Part 4 — concurrent SSE stream caps ────────────────
+# Per-sub limit on simultaneously-open SSE connections. Combined with
+# the per-stream lifetime cap below this bounds total fd / coroutine
+# pressure to (max_subs × MAX_STREAMS_PER_SUB) at any instant.
+_MAX_STREAMS_PER_SUB:   int   = 3
+# Hard upper bound on a single SSE generator's wall-clock lifetime.
+# Pipelines that legitimately exceed this should re-subscribe with a
+# fresh ticket; the client UI auto-handles that.
+_MAX_STREAM_LIFETIME_S: float = 120.0
 
-    `EventSource` (browser built-in) cannot send custom headers, so we
-    accept the token via `?token=...` query string as well as the
-    standard `Authorization: Bearer` header. Header wins when both
-    are present.
+_active_streams_lock: Lock = Lock()
+_active_streams_by_sub: Counter[str] = Counter()
+
+
+def _stream_admit(sub: str) -> None:
+    """Reserve one concurrent-stream slot for `sub`. 429 on overflow."""
+    with _active_streams_lock:
+        current = _active_streams_by_sub[sub]
+        if current >= _MAX_STREAMS_PER_SUB:
+            logger.warning(
+                f"SSE stream DENIED | sub={sub} active={current} "
+                f"cap={_MAX_STREAMS_PER_SUB}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    f"Too many concurrent SSE streams "
+                    f"(cap={_MAX_STREAMS_PER_SUB} per user)"
+                ),
+                headers={"Retry-After": "5"},
+            )
+        _active_streams_by_sub[sub] = current + 1
+
+
+def _stream_release(sub: str) -> None:
+    """Release one slot. Safe to call multiple times — clamps at 0."""
+    with _active_streams_lock:
+        new_value = _active_streams_by_sub[sub] - 1
+        if new_value <= 0:
+            _active_streams_by_sub.pop(sub, None)
+        else:
+            _active_streams_by_sub[sub] = new_value
+
+
+def _get_ticket_store(request: Request) -> StreamTicketStore:
+    """Resolve the bounded ticket store from app.state. 503 if missing."""
+    store = getattr(request.app.state, "stream_tickets", None)
+    if not isinstance(store, StreamTicketStore):
+        logger.error("StreamTicketStore missing on app.state")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server not fully initialised (ticket store missing).",
+        )
+    return store
+
+
+def _mint_ticket(request: Request, request_id: str, user: UserPrincipal) -> str:
+    """Mint a ticket via the bounded store. Maps quota errors to 429.
+
+    Master Patch Part 4 — store enforces global maxsize=10k, TTL=30s,
+    and per-sub cap of 20 concurrent unconsumed tickets.
     """
-    bearer = request.headers.get("authorization", "")
-    jwt_token: str | None = None
-    if bearer.lower().startswith("bearer "):
-        jwt_token = bearer[7:].strip()
-    if not jwt_token:
-        jwt_token = token_qs
-    if not jwt_token:
+    store = _get_ticket_store(request)
+    try:
+        ticket_id = await store.mint(sub=user.sub, role=user.role, request_id=request_id)
+    except TicketQuotaExceeded as exc:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing token (Authorization header or ?token= query param)",
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"Stream-ticket quota exceeded for this user "
+                f"({exc.current_count}/{exc.cap}). Wait for outstanding "
+                f"tickets to expire."
+            ),
+            headers={"Retry-After": str(exc.retry_after_s)},
         )
 
-    try:
-        payload = decode_jwt(jwt_token)
-    except HTTPException:
-        raise
-    except Exception as e:
+    logger.info(
+        f"stream-ticket minted | ticket={ticket_id[:8]}… "
+        f"request_id={request_id} actor={user.sub} ttl={_TICKET_TTL_SECONDS}s"
+    )
+    return ticket_id
+
+
+async def _consume_ticket(
+    request: Request, ticket_id: str, request_id: str
+) -> UserPrincipal:
+    """Validate and atomically burn a stream ticket.
+
+    Raises HTTPException on any failure — invalid UUID, expired,
+    already consumed, scope mismatch, or owner-registry mismatch.
+    On success returns the UserPrincipal encoded at mint time.
+    """
+    store = _get_ticket_store(request)
+    ticket: Optional[StreamTicket] = await store.pop(ticket_id)  # atomic single-use burn
+
+    if ticket is None:
+        logger.warning(
+            f"stream-ticket rejected | ticket={ticket_id[:8]}… "
+            f"reason=not_found_expired_or_already_used"
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {e}",
+            detail="Invalid, expired, or already-used stream ticket",
+        )
+    # Defence-in-depth — the store also TTL-evicts, but a ticket that
+    # just slipped through the eviction window is still rejectable here.
+    if time.monotonic() > ticket.expires_at:
+        logger.warning(
+            f"stream-ticket rejected | ticket={ticket_id[:8]}… reason=expired"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Stream ticket expired (TTL={_TICKET_TTL_SECONDS}s)",
+        )
+    if ticket.request_id != request_id:
+        logger.warning(
+            f"stream-ticket rejected | ticket={ticket_id[:8]}… "
+            f"reason=scope_mismatch expected={ticket.request_id} got={request_id}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Ticket is not scoped to this stream",
         )
 
-    sub  = payload.get("sub")  or ""
-    role_str = payload.get("role") or ""
+    # Master Patch Part 2 — defense-in-depth: even if the mint endpoint
+    # ever regresses, the consume path independently cross-checks the
+    # ticket's sub against the canonical owner registry. This guarantees
+    # `user.sub == ticket.sub == recorded_owner_of(request_id)` before
+    # the SSE upgrade exposes any pipeline events.
+    registry = getattr(request.app.state, "request_owners", None)
+    if registry is not None:
+        recorded_owner = await registry.get(request_id)
+        if recorded_owner is None:
+            logger.warning(
+                f"stream-ticket rejected | ticket={ticket_id[:8]}… "
+                f"reason=request_id_unknown_in_owner_registry"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Unknown request_id (no pipeline recorded)",
+            )
+        if recorded_owner != ticket.sub and ticket.role != Role.ADMIN:
+            logger.warning(
+                f"stream-ticket rejected | ticket={ticket_id[:8]}… "
+                f"reason=owner_mismatch ticket_sub={ticket.sub} "
+                f"recorded_owner={recorded_owner}"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Ticket subject does not match the pipeline owner",
+            )
+
+    user = UserPrincipal(sub=ticket.sub, role=ticket.role)
+    # Invariant: the reconstituted UserPrincipal must equal the ticket's
+    # encoded identity. Future refactors that change the reconstruction
+    # path will trip this assertion in tests.
+    assert user.sub == ticket.sub, "ticket sub reconstruction mismatch"
+
+    logger.info(
+        f"stream-ticket consumed | ticket={ticket_id[:8]}… "
+        f"request_id={request_id} actor={ticket.sub}"
+    )
+    return user
+
+
+# ── Master Patch Part 2 — ownership + identity helpers ───────────
+
+async def _bind_request_owner(
+    request: Request, request_id: str, user: UserPrincipal,
+) -> None:
+    """Record `user.sub` as the owner of `request_id` in the registry.
+
+    Called by submit_claim / submit_claim_upload BEFORE the agent
+    pipeline starts so any concurrent stream-ticket mint by another
+    user is immediately rejectable.
+
+    Fix A — now async (registry.set is async for Redis backend) and
+    raises 409 on OwnerConflictError instead of silently overwriting.
+    """
+    from auth.request_owners import OwnerConflictError  # local import avoids circular
+
+    registry = getattr(request.app.state, "request_owners", None)
+    if registry is None:
+        logger.error(
+            f"request_owners registry missing on app.state | request_id={request_id}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server not fully initialised (owner registry missing).",
+        )
     try:
-        role = Role(role_str)
+        await registry.set(request_id, user.sub)
+    except OwnerConflictError:
+        # UUID4 collision is cryptographically negligible.
+        # A conflict here means an attacker supplied a crafted request_id.
+        logger.warning(
+            f"request_id ownership conflict | request_id={request_id} sub={user.sub}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="request_id already in use by another pipeline.",
+        )
+    logger.debug(
+        f"request owner bound | request_id={request_id} sub={user.sub}"
+    )
+
+
+async def _assert_actor_may_submit_for(
+    *,
+    user:        UserPrincipal,
+    target_user_id: int,
+    mcp_router:  MCPRouter,
+    request_id:  str,
+) -> None:
+    """Refuse the request unless `user.sub` matches the email on
+    `target_user_id` (or `user` is ADMIN).
+
+    Closes the Insider User Fraud vulnerability: without this gate, an
+    employee with only ANALYST privilege could submit a PDF whose
+    `Asegurado: ID:` line names ANY customer and persist a claim
+    against that customer. With this gate, the JWT actor must be the
+    customer themself (self-service) OR an admin (ops / backfill).
+
+    Args:
+        user:           Authenticated principal from JWT.
+        target_user_id: user_id parsed from the PDF / decided by agent.
+        mcp_router:     For the read-only users.get_user_by_id call.
+        request_id:     For correlated logging.
+
+    Raises:
+        HTTPException 403: actor identity does not match target customer.
+        HTTPException 502: users MCP unreachable; fail closed (do not
+                           persist a claim whose ownership we can't verify).
+    """
+    if user.role == Role.ADMIN:
+        return  # ops / backfill bypass — explicitly authorised role
+
+    try:
+        u = await mcp_router.call(
+            "legacy-provider", "get_user_by_id",
+            caller_role=user.role, user_id=target_user_id,
+        )
     except ValueError:
+        # Unknown user — the agent hallucinated or the PDF lied.
+        logger.warning(
+            f"submit DENIED | request_id={request_id} actor={user.sub} "
+            f"reason=target_user_not_found target_uid={target_user_id}"
+        )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Unknown role in token: {role_str!r}",
+            detail="You are not authorised to file claims for this user_id",
         )
-    if not has_role_or_higher(role, Role.ANALYST):
+    except Exception as e:
+        logger.error(
+            f"submit DENIED | request_id={request_id} actor={user.sub} "
+            f"reason=users_mcp_error err={e!s}"
+        )
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Analyst role or higher required to subscribe",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not verify claim ownership upstream.",
         )
-    return UserPrincipal(sub=sub, role=role)
 
+    target_email = (u.get("email") or "").strip().lower()
+    actor_sub = user.sub.strip().lower()
+    if not target_email or target_email != actor_sub:
+        logger.warning(
+            f"submit DENIED cross-user | request_id={request_id} "
+            f"actor={user.sub} target_uid={target_user_id} "
+            f"target_email={target_email!r}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorised to file claims for this user_id",
+        )
+
+    logger.info(
+        f"submit ownership OK | request_id={request_id} actor={user.sub} "
+        f"target_uid={target_user_id}"
+    )
+
+
+# ── POST /claims/{request_id}/stream-ticket ──────────────────────
+
+@router.post(
+    "/{request_id}/stream-ticket",
+    response_model=StreamTicketResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Mint a short-lived single-use stream ticket for SSE auth",
+    description=(
+        "Client sends its JWT in the standard `Authorization: Bearer` header "
+        "and receives a narrow-scoped, single-use ticket valid for "
+        f"{_TICKET_TTL_SECONDS} seconds. The ticket is then passed as "
+        "`?ticket=UUID` when opening the EventSource SSE connection, "
+        "preventing JWT leakage into logs, proxies, and browser history. "
+        "Requires `analyst` role+."
+    ),
+    responses={
+        401: {"description": "Missing or invalid JWT"},
+        403: {"description": "Insufficient role"},
+    },
+)
+async def create_stream_ticket(
+    request_id: str,
+    request:    Request,
+    user:       UserPrincipal = Depends(require_role(Role.ANALYST)),
+) -> StreamTicketResponse:
+    """Mint a single-use SSE ticket scoped to `request_id`.
+
+    Master Patch Part 2 — cross-checks the JWT actor against the canonical
+    pipeline-owner registry. Without this, any valid ANALYST could mint a
+    ticket for another user's in-flight pipeline (request_ids leak via
+    logs, X-Trace-Id, Langfuse) and exfiltrate the entire SSE feed.
+    """
+    registry = getattr(request.app.state, "request_owners", None)
+    if registry is None:
+        logger.error(
+            f"stream-ticket DENIED | reason=registry_missing request_id={request_id}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Server not fully initialised (owner registry missing).",
+        )
+
+    owner = await registry.get(request_id)
+    if owner is None:
+        logger.warning(
+            f"stream-ticket DENIED | reason=unknown_request_id "
+            f"request_id={request_id} actor={user.sub}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Unknown request_id (no pipeline recorded or expired)",
+        )
+
+    if owner != user.sub and user.role != Role.ADMIN:
+        logger.warning(
+            f"stream-ticket DENIED cross-user | request_id={request_id} "
+            f"actor={user.sub} owner={owner}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not own this pipeline",
+        )
+
+    ticket_id = _mint_ticket(request, request_id, user)
+    return StreamTicketResponse(ticket=ticket_id, scoped_to=request_id)
+
+
+# ── GET /claims/stream/{request_id} (SSE, Phase E1.3) ────────────
 
 @router.get(
     "/stream/{request_id}",
     summary="Subscribe to Lía's live event stream for a request (SSE)",
     description=(
-        "Server-Sent Events feed of pipeline events keyed by `request_id` "
-        "(set the same id as `X-Trace-Id` on the corresponding /submit-upload "
-        "or /reanalyze-upload). Each line is one `data: {json}` event; "
-        "stream ends on `pipeline.done` or `pipeline.error`. Requires "
-        "`analyst` role+. EventSource clients pass the JWT via `?token=` "
-        "since the browser API can't set Authorization headers."
+        "Server-Sent Events feed of pipeline events keyed by `request_id`. "
+        "Authentication uses a short-lived single-use ticket obtained from "
+        "`POST /claims/{request_id}/stream-ticket` — pass it as `?ticket=UUID`. "
+        "The ticket is burned on first connection; JWT is never in the URL. "
+        "Each event line is `data: {json}`; stream ends on "
+        "`pipeline.done` or `pipeline.error`. Requires `analyst` role+."
     ),
     responses={
-        401: {"description": "Missing or invalid token"},
-        403: {"description": "Insufficient role"},
+        401: {"description": "Missing, invalid, or already-used ticket"},
+        403: {"description": "Ticket scope mismatch or insufficient role"},
     },
 )
 async def stream_claim_events(
     request_id: str,
     request:    Request,
-    token:      str | None = Query(
-        None,
-        description="JWT bearer token (for EventSource, which can't set headers)",
+    ticket:     str = Query(
+        ...,
+        description=(
+            "Single-use stream ticket from POST /claims/{request_id}/stream-ticket. "
+            "Valid for 30 seconds, scoped to this request_id, burned on use."
+        ),
     ),
 ) -> StreamingResponse:
-    user = await _verify_stream_token(request, token)
+    user = await _consume_ticket(request, ticket, request_id)
+
+    # Master Patch Part 4 — reserve a concurrent-stream slot for this
+    # subject BEFORE constructing the generator. If admission fails
+    # (429) we return without ever materialising a bus entry.
+    _stream_admit(user.sub)
+
     logger.info(
-        f"GET /claims/stream/{request_id} | actor={user.sub} role={user.role.value}"
+        f"GET /claims/stream/{request_id} | actor={user.sub} role={user.role.value} "
+        f"max_lifetime_s={_MAX_STREAM_LIFETIME_S}"
     )
 
     bus = get_event_bus()
@@ -720,23 +1197,90 @@ async def stream_claim_events(
         # First chunk: an immediate keepalive so the browser knows the
         # connection is established (some proxies buffer the first event).
         yield ": connected\n\n"
+        deadline = time.monotonic() + _MAX_STREAM_LIFETIME_S
+        yielded_anything = False
+        timed_out = False
         try:
-            async for ev in bus.subscribe(request_id):
+            # Master Patch Part 4 — require_existing=True prevents the
+            # bus from materialising an empty queue for an unknown
+            # request_id (closes the connection-hoarding DoS).
+            async for ev in bus.subscribe(request_id, require_existing=True):
+                # Master Patch Part 4 — hard lifetime cap. Checked at
+                # every loop iteration (which happens at least every
+                # keepalive_s seconds), so the actual close lag is
+                # bounded by ~15s past the deadline.
+                if time.monotonic() > deadline:
+                    timed_out = True
+                    logger.info(
+                        f"SSE generator | request_id={request_id} "
+                        f"actor={user.sub} closing reason=max_lifetime "
+                        f"limit_s={_MAX_STREAM_LIFETIME_S}"
+                    )
+                    err = {
+                        "type": "pipeline.timeout",
+                        "request_id": request_id,
+                        "data": {
+                            "reason": "max_stream_lifetime",
+                            "limit_s": _MAX_STREAM_LIFETIME_S,
+                        },
+                    }
+                    yield (
+                        "event: pipeline.timeout\n"
+                        f"data: {_json_stream.dumps(err)}\n\n"
+                    )
+                    return
+
                 if ev is None:
                     # Keepalive tick — SSE comments are ignored by the client.
                     yield ": keepalive\n\n"
                     continue
+                yielded_anything = True
                 # SSE format: optional `event:` name, then `data:` payload.
                 ev_type = ev.get("type") or "message"
-                yield f"event: {ev_type}\ndata: {_json_stream.dumps(ev, ensure_ascii=False)}\n\n"
-        except Exception as e:
-            # If the bus iterator dies, surface it and close out.
-            logger.warning(
-                f"GET /claims/stream/{request_id} | generator error: {e}"
+                yield (
+                    f"event: {ev_type}\n"
+                    f"data: {_json_stream.dumps(ev, ensure_ascii=False)}\n\n"
+                )
+        except asyncio.CancelledError:
+            # Client disconnected — graceful close path. Re-raise so
+            # asyncio's cancellation contract is honoured.
+            logger.info(
+                f"SSE generator | request_id={request_id} actor={user.sub} "
+                f"closing reason=client_disconnect"
             )
-            err = {"type": "pipeline.error", "request_id": request_id,
-                   "data": {"error": str(e)}}
-            yield f"event: pipeline.error\ndata: {_json_stream.dumps(err)}\n\n"
+            raise
+        except Exception as e:
+            # Master Patch Part 4 — log the verbose error internally but
+            # send only a sanitised payload to the client. No raw
+            # exception strings ever cross the wire.
+            logger.warning(
+                f"SSE generator | request_id={request_id} actor={user.sub} "
+                f"unexpected error: {e!r}",
+                exc_info=True,
+            )
+            err = {
+                "type": "pipeline.error",
+                "request_id": request_id,
+                "data": {"error": "stream_terminated_unexpectedly"},
+            }
+            yield (
+                "event: pipeline.error\n"
+                f"data: {_json_stream.dumps(err)}\n\n"
+            )
+        finally:
+            # Always release the concurrent-stream slot, even on timeout
+            # or client disconnect. This is the only place the counter
+            # is decremented.
+            _stream_release(user.sub)
+            if not yielded_anything and not timed_out:
+                # Master Patch Part 4 — subscriber connected against an
+                # unknown / dead request_id. Emit one diagnostic event
+                # so the UI can tell the user the stream is gone, then
+                # close. No queue was ever materialised.
+                logger.info(
+                    f"SSE generator | request_id={request_id} actor={user.sub} "
+                    f"closing reason=unknown_or_expired_request_id"
+                )
 
     headers = {
         "Cache-Control":     "no-cache",
@@ -768,6 +1312,14 @@ async def _verify_claim_exists(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Claim {claim_id} not found",
         )
+    except MCPClientError as e:
+        logger.error(
+            "_verify_claim_exists upstream failure | claim_id=%s internal=%s",
+            claim_id, e.internal, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=e.public,
+        )
 
 
 async def _run_reanalysis(
@@ -795,8 +1347,8 @@ async def _run_reanalysis(
             detail="Agent router not ready — try again shortly.",
         )
 
-    # Reuse the per-request trace_id; fall back when out-of-scope.
-    reanalysis_request_id = get_trace_id() or str(uuid.uuid4())
+    # Fix A — always a fresh server-side UUID4; never from X-Trace-Id.
+    reanalysis_request_id = str(uuid.uuid4())
     result = await agent_router.process_claim(
         str(pdf_path),
         persist=False,
@@ -836,8 +1388,13 @@ async def _run_reanalysis(
     # MOST RECENT Lía run (not just the original submit). The marker
     # sits inside the re-analysis block so extractor knows which trace
     # belongs to which event.
+    # Master Patch Part 3 — the marker is HMAC-SHA256 signed. The
+    # claims MCP's append_reasoning tool rejects writes whose embedded
+    # markers don't verify, so spoofing the trace pointer is no longer
+    # possible from any MCP caller.
     trace_marker = (
-        f"\n[trace_id: {reanalysis_request_id}]" if reanalysis_request_id else ""
+        f"\n{sign_trace_marker(reanalysis_request_id)}"
+        if reanalysis_request_id else ""
     )
     block = (
         f"[RE-ANALYSIS — {ts} by {actor}]\n"
@@ -858,9 +1415,19 @@ async def _run_reanalysis(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(e),
         )
+    except MCPClientError as e:
+        logger.error(
+            "reanalyze append_reasoning upstream failure | claim=%s internal=%s",
+            claim_id, e.internal, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Re-analysis succeeded but could not be persisted.",
+        )
     except Exception as e:
         logger.error(
-            f"reanalyze append_reasoning failed | claim={claim_id} err={e}"
+            f"reanalyze append_reasoning failed | claim={claim_id} err={e!r}",
+            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1088,18 +1655,65 @@ async def reject_claim(
     )
 
 
-# ── Shared helper for /approve and /reject (Rule 6 + C2.2 guards) ─
+# ── POST /claims/{claim_id}/confirm (Rule 6 HITL gate) ───────────
+
+@router.post(
+    "/{claim_id}/confirm",
+    response_model=ClaimConfirmResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Human auditor confirms a claim decision (Rule 6 HITL gate)",
+    description=(
+        "Unified HITL endpoint. The human auditor reviews the AI proposal "
+        "and commits the final decision: APPROVED, REJECTED, or MANUAL_REVIEW. "
+        "The claim must be in AWAITING_INPUT status. Requires `auditor` role+. "
+        "Actor identity is taken from the JWT `sub` — never from the body."
+    ),
+    responses={
+        401: {"description": "Missing or invalid token"},
+        403: {"description": "Insufficient role"},
+        404: {"description": "No claim exists with the given claim_id"},
+        409: {"description": "Claim is not in AWAITING_INPUT state"},
+        500: {"description": "Database error"},
+    },
+)
+async def confirm_claim(
+    claim_id:   int,
+    body:       ClaimConfirmRequest,
+    user:       UserPrincipal = Depends(require_role(Role.AUDITOR)),
+    mcp_router: MCPRouter     = Depends(get_mcp_router),
+) -> ClaimConfirmResponse:
+    """Human auditor commits the final decision for an AWAITING_INPUT claim."""
+    logger.info(
+        f"POST /claims/{claim_id}/confirm | actor={user.sub} "
+        f"role={user.role.value} decision={body.decision}"
+    )
+    row = await _decide_claim(
+        claim_id=claim_id,
+        action="confirm",
+        new_status=body.decision,
+        reason=body.reason,
+        user=user,
+        mcp_router=mcp_router,
+    )
+    return ClaimConfirmResponse(
+        claim_id=claim_id,
+        new_status=row.claim_status,
+        actor=user.sub,
+    )
+
+
+# ── Shared helper for /approve, /reject and /confirm (Rule 6 + C2.2 guards) ─
 
 async def _decide_claim(
     *,
     claim_id:   int,
-    action:     str,                  # "approve" | "reject"
-    new_status: str,                  # "APPROVED" | "REJECTED"
+    action:     str,                  # "approve" | "reject" | "confirm"
+    new_status: str,                  # "APPROVED" | "REJECTED" | "MANUAL_REVIEW"
     reason:     str,
     user:       UserPrincipal,
     mcp_router: MCPRouter,
 ) -> ClaimStatusResponse:
-    """Run C2.2 input guards, then route to MCP. Used by approve + reject.
+    """Run C2.2 input guards, then route to MCP. Used by approve + reject + confirm.
 
     Flow:
         1. validate_approval_input → reason check + rate limit + idempotency
@@ -1112,7 +1726,8 @@ async def _decide_claim(
     )
 
     # ── Step 1+2+3: C2.2 input guards ────────────────────────────
-    check = validate_approval_input(
+    # Fix D: validate_approval_input is now async (Redis rate/idempotency).
+    check = await validate_approval_input(
         actor=user.sub, claim_id=claim_id, action=action, reason=reason,
     )
 
@@ -1148,17 +1763,28 @@ async def _decide_claim(
     except ValueError as e:
         logger.warning(f"POST /claims/{claim_id}/{action} not found: {e}")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except MCPClientError as e:
+        logger.error(
+            "POST /claims/%s/%s upstream failure | internal=%s",
+            claim_id, action, e.internal, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=e.public,
+        )
     except Exception as e:
         if e.__class__.__name__ == "ClaimStateConflictError":
             logger.warning(f"POST /claims/{claim_id}/{action} conflict: {e}")
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-        logger.error(f"POST /claims/{claim_id}/{action} error: {e}")
+        logger.error(
+            f"POST /claims/{claim_id}/{action} error: {e!r}", exc_info=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal error updating claim",
         )
 
-    # Record success for idempotency + rate counting
-    record_approval_action(user.sub, claim_id, action, row)
+    # Record success for idempotency + rate counting.
+    # Fix D: now async + passes reason so the full key is recorded.
+    await record_approval_action(user.sub, claim_id, action, row, reason=reason)
 
     return ClaimStatusResponse(**row)

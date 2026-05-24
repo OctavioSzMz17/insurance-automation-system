@@ -1,13 +1,12 @@
-"""LangChain @tool wrappers for the Legacy Provider MCP server.
+"""LangChain @tool wrappers for user/policy MCP read services.
 
-Thin async wrappers that expose the legacy-provider MCP functions to
-LangGraph agents. Phase B uses direct in-process calls (via the
-importlib loader); Phase C swaps to SSE clients.
+Fix 1 (Rule 7): calls users and policies MCPs over SSE instead of in-process.
 
 Rules applied:
     Rule 2  — Read-only DB access; monetary fields stay as strings
     Rule 3  — Read-only domain (legacy data)
-    Rule 11 — Type hints; structured outputs returned as JSON-safe dicts
+    Rule 7  — Out-of-process SSE call; no in-process imports
+    Rule 11 — Type hints throughout
 """
 
 from __future__ import annotations
@@ -17,13 +16,9 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from ._loader import load_mcp_tool
+from ..mcp_client import call_mcp_tool
 
 logger = logging.getLogger(__name__)
-
-# Bind the underlying MCP tool functions once at import time
-_get_user_by_id          = load_mcp_tool("legacy-provider", "get_user_by_id")
-_get_policies_by_user_id = load_mcp_tool("legacy-provider", "get_policies_by_user_id")
 
 
 @tool
@@ -38,8 +33,14 @@ async def get_user_by_id(user_id: int) -> dict[str, Any]:
     Args:
         user_id: Integer primary key of the policyholder.
     """
+    from config import get_settings
     logger.info(f"@tool get_user_by_id | user_id={user_id}")
-    return await _get_user_by_id(user_id)
+    settings = get_settings()
+    return await call_mcp_tool(
+        settings.users_mcp_url,
+        "get_user_by_id",
+        {"user_id": user_id},
+    )
 
 
 @tool
@@ -56,8 +57,14 @@ async def get_policies_by_user_id(user_id: int) -> list[dict[str, Any]]:
     Args:
         user_id: Integer primary key of the policyholder.
     """
+    from config import get_settings
     logger.info(f"@tool get_policies_by_user_id | user_id={user_id}")
-    return await _get_policies_by_user_id(user_id)
+    settings = get_settings()
+    return await call_mcp_tool(
+        settings.policies_mcp_url,
+        "get_policies_by_user_id",
+        {"user_id": user_id},
+    )
 
 
 LEGACY_TOOLS = [get_user_by_id, get_policies_by_user_id]

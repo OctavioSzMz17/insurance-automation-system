@@ -153,6 +153,7 @@ class EventBus:
         request_id: str,
         *,
         keepalive_s: float = 15.0,
+        require_existing: bool = True,
     ) -> AsyncIterator[Optional[StreamEvent]]:
         """Async iterator over events for `request_id`.
 
@@ -162,11 +163,39 @@ class EventBus:
               handler can flush a comment-line to detect dropped
               client connections
 
+        Args:
+            request_id:        Pipeline correlation id to subscribe to.
+            keepalive_s:       Cadence of `None` yields when the queue
+                               is idle.
+            require_existing:  Master Patch Part 4 — when True (default),
+                               do NOT materialise an empty queue for an
+                               unknown request_id. The generator returns
+                               immediately without yielding, so the
+                               caller's `async for` loop exits cleanly.
+                               This closes the connection-hoarding DoS
+                               vector where an attacker could open SSE
+                               streams against arbitrary request_ids and
+                               pin file descriptors + coroutines for
+                               minutes at a time waiting for events
+                               that will never arrive.
+
         Terminates when a `pipeline.done` or `pipeline.error` event
         flows through, or when the consumer breaks out of the loop.
         Cleans up the queue on exit.
         """
-        entry = self._get_or_create(request_id)
+        # Master Patch Part 4 — fail-fast for unknown request_ids.
+        if require_existing:
+            entry = self._entries.get(request_id)
+            if entry is None:
+                logger.info(
+                    "event_bus.subscribe | unknown request_id=%s require_existing=True; "
+                    "closing immediately",
+                    request_id,
+                )
+                return  # async generator exits — caller sees zero events
+        else:
+            entry = self._get_or_create(request_id)
+
         q = entry.queue
         try:
             while True:

@@ -31,6 +31,14 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 from db import get_engine  # noqa: E402
 from tools import write_restricted  # noqa: E402
 
+# Master Patch Part 3 — verify any embedded [trace_id: ...] markers
+# against the shared HMAC secret. Caller-controlled text containing
+# unsigned/forged markers is rejected before it touches the DB.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from packages.common.trace_signing import (  # noqa: E402
+    text_contains_unsigned_trace_markers,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,6 +66,22 @@ async def append_reasoning(claim_id: int, text_to_append: str) -> dict[str, Any]
     """
     if not text_to_append or not text_to_append.strip():
         raise ValueError("text_to_append must be non-empty")
+
+    # Master Patch Part 3 — audit-trail spoofing defence.
+    # Any [trace_id: ...] marker embedded in caller-controlled text
+    # must verify under PROPOSAL_SIGNING_KEY. The orchestrator's
+    # _run_reanalysis builds signed markers; an attacker (or a
+    # compromised AUDITOR session) cannot forge a marker pointing at
+    # someone else's Langfuse session.
+    if text_contains_unsigned_trace_markers(text_to_append):
+        logger.warning(
+            f"append_reasoning REJECTED | claim_id={claim_id} "
+            f"reason=unsigned_trace_marker_in_text"
+        )
+        raise ValueError(
+            "text_to_append contains an unsigned or invalid "
+            "[trace_id: ...] marker — refusing to persist."
+        )
 
     logger.info(
         f"append_reasoning called | claim_id={claim_id} bytes={len(text_to_append)}"

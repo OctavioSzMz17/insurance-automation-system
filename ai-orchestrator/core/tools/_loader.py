@@ -1,50 +1,19 @@
-"""In-process loader for MCP tool functions.
+"""ERADICATED — Fix 1 (Transport Bypass remediation, Rule 7).
 
-The MCP servers are not pip-installable packages (their parent dirs
-contain hyphens), and naming them `tools/` collides with this very
-package (`core.tools`). So we load the MCP tool modules directly by
-file path using importlib.util, bypassing the regular import system.
+This module previously loaded MCP tool Python files in-process using
+importlib.util, bypassing all network isolation and service boundaries.
 
-Phase C C1.3 will replace this loader with real SSE clients.
+All MCP communication now goes through core.mcp_client.call_mcp_tool
+over authenticated HTTP/SSE to the MCP servers' /sse endpoints.
+
+Do NOT import from this module. Any remaining reference is a bug.
 """
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import types
-from pathlib import Path
-from typing import Any
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-
-
-def _load_module(unique_name: str, file_path: Path) -> types.ModuleType:
-    """Load a Python module from a file path under a unique sys.modules name."""
-    if not file_path.exists():
-        raise FileNotFoundError(f"MCP tool module not found: {file_path}")
-
-    spec = importlib.util.spec_from_file_location(unique_name, file_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load spec for {file_path}")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[unique_name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def load_mcp_tool(mcp_server: str, tool_name: str) -> Any:
-    """Return the async tool function `tool_name` from `mcp_server`.
-
-    Args:
-        mcp_server: Folder name under mcp-servers/ (e.g. "legacy-provider").
-        tool_name:  Python file stem under that server's tools/ folder.
-
-    Returns:
-        The async function with the same name as the file.
-    """
-    file_path = _PROJECT_ROOT / "mcp-servers" / mcp_server / "tools" / f"{tool_name}.py"
-    unique_name = f"_mcp_{mcp_server.replace('-', '_')}_{tool_name}"
-    module = _load_module(unique_name, file_path)
-    return getattr(module, tool_name)
+def load_mcp_tool(*args: object, **kwargs: object) -> None:  # type: ignore[return]
+    raise ImportError(
+        "_loader.load_mcp_tool is eradicated (Fix 1 / Rule 7). "
+        "Use core.mcp_client.call_mcp_tool with the MCP server's SSE URL."
+    )

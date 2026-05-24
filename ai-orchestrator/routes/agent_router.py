@@ -111,12 +111,9 @@ class AgentRouter:
 
         Args:
             pdf_path: Absolute path to the claim PDF.
-            persist:  When True (default), the auditor is instructed to call
-                      the `create_claim` MCP tool and a new claim row is
-                      written. When False, both agents run to completion
-                      and produce a recommendation, but **no DB write
-                      happens** — useful for re-analysis of an existing
-                      claim where we only want fresh reasoning.
+            persist:  Unused by agents (Rule 6 — agents are READ-ONLY).
+                      Kept for caller compatibility; the FastAPI route handler
+                      decides whether to call create_claim after this returns.
             trace_name / session_id / actor / trace_metadata:
                 Observability context (D2.x). When the configured tracer is
                 Langfuse, both agents' LLM calls + tool calls end up under
@@ -225,14 +222,10 @@ class AgentRouter:
                 self.auditor,
                 {
                     "triage_report": triage_report,
-                    "persist":       persist,
                     "callbacks":     auditor_callbacks,
                 },
-                # validator context — keeps both checks honest:
-                #   triage_report → cross-reference fields
-                #   persist       → skip must_call_create_claim when advisory
+                # validator context — cross-reference fields against triage_report
                 triage_report=triage_report,
-                persist=persist,
             )
         except Exception as e:
             _emit("pipeline.error", stage="auditor", data={"error": str(e)})

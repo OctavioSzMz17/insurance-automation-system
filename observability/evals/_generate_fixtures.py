@@ -23,6 +23,7 @@ fine and makes the eval harness self-contained.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from reportlab.lib.pagesizes import letter
@@ -32,6 +33,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
 _HERE = Path(__file__).resolve().parent
 _GOLDEN = _HERE / "golden"
+logger = logging.getLogger("observability.evals.generate_fixtures")
 
 
 # ── Case fixtures ────────────────────────────────────────────────
@@ -141,8 +143,13 @@ def main() -> None:
     for case in CASES:
         out = _GOLDEN / case["dir"] / "claim.pdf"
         _build_pdf(out, case["data"])
-        print(f"✓ wrote {out}")
+        logger.info("Fixture generated | path=%s", out)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
     main()

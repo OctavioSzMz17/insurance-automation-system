@@ -1,46 +1,47 @@
-"""Claims MCP Server — B2.3
+"""Claims MCP Server — SSE transport (Rule 7).
 
-Exposes write-restricted claim tools to the auditor_agent. Owns the
-claim-write domain (Rule 3).
+Exposes all claim tools (read + write-restricted).
+Replaced stdio transport with Starlette/Uvicorn SSE (Fix 1).
+Also completes the TOOLS list: adds list_claims and append_reasoning.
 
-Tools:
-    create_claim — @write_restricted, persists a ClaimDecision
-
-Transport:
-    stdio  — default (Claude Desktop / local dev)
-    SSE    — production (Rule 7: MCP ↔ orchestrator via SSE only)
+Transport: HTTP/SSE via SseServerTransport on MCP_PORT (default 8002).
 
 Rules applied:
-    Rule 3  — Domain isolation; only WRITE-capable agents may call these tools
-    Rule 7  — Role-based access enforced at the MCP router (C1.5)
-    Rule 8  — DATABASE_URL read from .env, never hardcoded
-    Rule 9  — Structured logging; no print() statements
-    Rule 11 — Type hints on every function
+    Rule 3  — Domain isolation; write tools marked via @write_restricted
+    Rule 7  — SSE transport; no stdio
+    Rule 8  — DATABASE_URL read from .env
+    Rule 9  — Structured logging; no print()
+    Rule 11 — Type hints throughout
 """
 
-import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
-# Allow direct execution by Claude Desktop / Python CLI
 _HERE = Path(__file__).parent
-sys.path.insert(0, str(_HERE))              # exposes db.py, tools/
-sys.path.insert(0, str(_HERE.parents[1]))   # exposes packages/common
+sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_HERE.parent))      # mcp-servers/ — Master Patch Part 1
+sys.path.insert(0, str(_HERE.parents[1]))
 
+import uvicorn
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
+from mcp.server.sse import SseServerTransport
+from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.routing import Mount, Route
 import mcp.types as types
+
+from _common.auth import MCPAuthMiddleware  # Master Patch Part 1
 
 from tools.create_claim        import create_claim
 from tools.get_claim_by_id     import get_claim_by_id
 from tools.update_claim_status import update_claim_status
+from tools.list_claims         import list_claims
+from tools.append_reasoning    import append_reasoning
 
-# ------------------------------------------------------------------ #
-# Logging (stderr keeps stdout clean for MCP protocol)               #
-# ------------------------------------------------------------------ #
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -49,9 +50,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------ #
-# Server instance                                                     #
-# ------------------------------------------------------------------ #
 server: Server = Server("claims")
 
 TOOLS: list[types.Tool] = [
@@ -59,31 +57,45 @@ TOOLS: list[types.Tool] = [
         name="get_claim_by_id",
         description=(
             "Fetch a single claim record by its integer claim_id. "
-            "Read-only; returns every column from the claims row."
+            "Read-only."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "claim_id": {
-                    "type": "integer",
-                    "description": "Primary key of the claim to retrieve.",
-                }
+                "claim_id": {"type": "integer", "description": "Claim primary key."}
             },
             "required": ["claim_id"],
         },
     ),
     types.Tool(
+        name="list_claims",
+        description=(
+            "Return a paginated list of claim rows ordered most-recent-first. "
+            "Optional status filter. Read-only."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": ["string", "null"],
+                    "description": "Optional claim_status filter (e.g. MANUAL_REVIEW).",
+                },
+                "limit":  {"type": "integer", "description": "Max rows (1-500).", "default": 100},
+                "offset": {"type": "integer", "description": "Skip N rows.", "default": 0},
+            },
+        },
+    ),
+    types.Tool(
         name="update_claim_status",
         description=(
-            "Manually move a claim from MANUAL_REVIEW/AWAITING_INPUT to "
-            "APPROVED or REJECTED. WRITE-RESTRICTED. Appends an audit "
-            "line to ai_reasoning."
+            "Move a claim from MANUAL_REVIEW/AWAITING_INPUT to APPROVED or REJECTED. "
+            "WRITE-RESTRICTED."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "claim_id":   {"type": "integer"},
-                "new_status": {"type": "string", "enum": ["APPROVED", "REJECTED"]},
+                "new_status": {"type": "string", "enum": ["APPROVED", "REJECTED", "MANUAL_REVIEW"]},
                 "actor":      {"type": "string"},
                 "note":       {"type": "string"},
             },
@@ -93,22 +105,24 @@ TOOLS: list[types.Tool] = [
     types.Tool(
         name="create_claim",
         description=(
-            "Persist an auditor-produced claim decision into the database. "
-            "WRITE-RESTRICTED — only callable by agents with WRITE role. "
-            "Returns the persisted claim row including the assigned claim_id."
+            "Persist a new claim row into the database with AWAITING_INPUT status. "
+            "WRITE-RESTRICTED — called only by the orchestrator after agent reasoning."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "user_id":              {"type": "integer"},
-                "policy_id":            {"type": "integer"},
-                "incident_date":        {"type": "string", "description": "ISO-8601 date"},
-                "incident_description": {"type": "string"},
-                "incident_location":    {"type": ["string", "null"]},
-                "severity_label":       {"type": "string", "enum": ["LOW", "HIGH", "TOTAL_LOSS"]},
+                "user_id":                {"type": "integer"},
+                "policy_id":              {"type": "integer"},
+                "incident_date":          {"type": "string"},
+                "incident_description":   {"type": "string"},
+                "incident_location":      {"type": ["string", "null"]},
+                "severity_label":         {"type": "string", "enum": ["LOW", "HIGH", "TOTAL_LOSS"]},
                 "reported_damage_amount": {"type": ["string", "number", "null"]},
-                "claim_status":         {"type": "string", "enum": ["APPROVED", "REJECTED", "MANUAL_REVIEW", "AWAITING_INPUT"]},
-                "ai_reasoning":         {"type": "string"},
+                "claim_status":           {
+                    "type": "string",
+                    "enum": ["APPROVED", "REJECTED", "MANUAL_REVIEW", "AWAITING_INPUT"],
+                },
+                "ai_reasoning":           {"type": "string"},
             },
             "required": [
                 "user_id", "policy_id", "incident_date",
@@ -117,26 +131,43 @@ TOOLS: list[types.Tool] = [
             ],
         },
     ),
+    types.Tool(
+        name="append_reasoning",
+        description=(
+            "Append a text block to an existing claim's ai_reasoning column. "
+            "Append-only — never overwrites. WRITE-RESTRICTED."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "claim_id":       {"type": "integer"},
+                "text_to_append": {"type": "string"},
+            },
+            "required": ["claim_id", "text_to_append"],
+        },
+    ),
 ]
 
 
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
-    logger.info("list_tools called")
     return TOOLS
 
 
 @server.call_tool()
-async def handle_call_tool(
-    name: str,
-    arguments: dict[str, Any],
-) -> list[types.TextContent]:
+async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
     logger.info(f"call_tool | name={name} arguments_keys={list(arguments.keys())}")
     try:
         if name == "create_claim":
             result = await create_claim(arguments)
         elif name == "get_claim_by_id":
             result = await get_claim_by_id(int(arguments["claim_id"]))
+        elif name == "list_claims":
+            result = await list_claims(
+                status=arguments.get("status"),
+                limit=int(arguments.get("limit", 100)),
+                offset=int(arguments.get("offset", 0)),
+            )
         elif name == "update_claim_status":
             result = await update_claim_status(
                 claim_id=int(arguments["claim_id"]),
@@ -144,24 +175,59 @@ async def handle_call_tool(
                 actor=str(arguments["actor"]),
                 note=str(arguments["note"]),
             )
+        elif name == "append_reasoning":
+            result = await append_reasoning(
+                claim_id=int(arguments["claim_id"]),
+                text_to_append=str(arguments["text_to_append"]),
+            )
         else:
             raise ValueError(f"Unknown tool: '{name}'")
-        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, default=str))]
+
+        return [types.TextContent(
+            type="text",
+            text=json.dumps(result, ensure_ascii=False, default=str),
+        )]
 
     except ValueError as e:
-        logger.warning(f"call_tool ValueError | tool={name} error={e}")
-        return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
-
+        # Business error — user-facing, safe to surface verbatim.
+        # Fix C: "kind": "business" so the orchestrator routes to ValueError.
+        logger.warning(f"call_tool business error | tool={name} error={e}")
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({"error": str(e), "kind": "business"}),
+        )]
     except RuntimeError as e:
-        logger.error(f"call_tool RuntimeError | tool={name} error={e}")
-        return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
+        # Internal error — DB / infra failure. Log the detail internally;
+        # Fix C: "kind": "internal" so the orchestrator raises MCPClientError
+        # and never surfaces the raw message to the HTTP client.
+        logger.error(f"call_tool internal error | tool={name} error={e}")
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({"error": str(e), "kind": "internal"}),
+        )]
 
 
-async def main() -> None:
-    logger.info("Claims MCP server starting (stdio transport)")
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+# ── SSE transport wiring ──────────────────────────────────────────
 
+sse_transport = SseServerTransport("/messages/")
+
+
+async def handle_sse(scope: Any, receive: Any, send: Any) -> None:
+    async with sse_transport.connect_sse(scope, receive, send) as streams:
+        await server.run(streams[0], streams[1], server.create_initialization_options())
+
+
+starlette_app = Starlette(
+    debug=False,
+    middleware=[Middleware(MCPAuthMiddleware)],  # Master Patch Part 1
+    routes=[
+        Route("/sse", endpoint=handle_sse),
+        Mount("/messages", app=sse_transport.handle_post_message),
+    ],
+)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    host = os.getenv("MCP_HOST", "0.0.0.0")
+    port = int(os.getenv("MCP_PORT", "8002"))
+    logger.info(f"Claims MCP server starting | transport=SSE host={host} port={port}")
+    uvicorn.run(starlette_app, host=host, port=port)

@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── POST /claims/submit ──────────────────────────────────────────
@@ -20,12 +20,54 @@ class ClaimSubmitRequest(BaseModel):
     Phase C C1.1 accepts only a pdf_path (orchestrator + MCP share a
     filesystem volume). Multipart upload (`UploadFile`) will be added
     when we deploy with the shared PVC (Phase B1.4 already provisions it).
+
+    Fix B — pdf_path is validated at parse time:
+        - Must be non-empty after stripping whitespace
+        - Must not contain null bytes (path injection)
+        - Must not contain '..' components (directory traversal)
+        - Must be absolute (relative paths are ambiguous across services)
+    The route layer adds a second check: the resolved path must fall
+    within CLAIM_UPLOAD_DIR (defence-in-depth).
     """
     pdf_path: str = Field(
         ...,
         description="Absolute filesystem path to the claim PDF.",
         min_length=1,
     )
+
+    @field_validator("pdf_path")
+    @classmethod
+    def validate_pdf_path(cls, v: str) -> str:
+        """Reject unsafe path patterns before the value ever reaches a route.
+
+        Checks are OS-agnostic so the validator works correctly on both
+        Windows (dev) and Linux/Docker (production):
+            - null bytes: never valid in any path
+            - '..' components: traversal regardless of separator used
+            - relative paths: os.path.isabs handles both / and C:\\ forms
+        """
+        import os
+
+        v = v.strip()
+        if not v:
+            raise ValueError("pdf_path must not be blank")
+
+        # Null bytes terminate C strings — never valid in a path.
+        if "\x00" in v:
+            raise ValueError("pdf_path must not contain null bytes")
+
+        # Directory traversal via '..' — split on both separators so
+        # mixed paths like /tmp/../etc are caught on any OS.
+        parts = v.replace("\\", "/").split("/")
+        if ".." in parts:
+            raise ValueError("pdf_path must not contain '..' components")
+
+        # os.path.isabs is OS-aware: True for /tmp/... on POSIX and
+        # C:\... on Windows; False for relative paths on both.
+        if not os.path.isabs(v):
+            raise ValueError("pdf_path must be an absolute path")
+
+        return v
 
 
 class ClaimSubmitResponse(BaseModel):
@@ -68,6 +110,38 @@ class ClaimApproveRequest(BaseModel):
 class ClaimRejectRequest(BaseModel):
     """Body for POST /claims/{claim_id}/reject (Rule 6 user rejection)."""
     reason: str = Field(..., min_length=1, max_length=2000)
+
+
+class ClaimConfirmRequest(BaseModel):
+    """Body for POST /claims/{claim_id}/confirm — unified Rule 6 HITL gate.
+
+    The human auditor supplies a final decision and a written reason.
+    Actor identity comes from the JWT `sub` claim — never from the body.
+    """
+    decision: Literal["APPROVED", "REJECTED", "MANUAL_REVIEW"]
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+
+class ClaimConfirmResponse(BaseModel):
+    """Response from POST /claims/{claim_id}/confirm."""
+    claim_id:   int
+    new_status: str
+    actor:      str
+    timestamp:  datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ── SSE Stream Ticket (Fix 3 — Rule 7 token hardening) ───────────
+
+class StreamTicketResponse(BaseModel):
+    """Response from POST /claims/{request_id}/stream-ticket.
+
+    The client opens the SSE connection using ?ticket=<ticket> instead
+    of ?token=JWT, preventing JWT leakage into logs and browser history.
+    Tickets are single-use and expire after `expires_in` seconds.
+    """
+    ticket:     str          # single-use UUID
+    expires_in: int = 30     # seconds until expiry
+    scoped_to:  str          # request_id this ticket grants access to
 
 
 # ── GET /claims/{claim_id} ───────────────────────────────────────

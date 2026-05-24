@@ -13,6 +13,7 @@ Rules applied:
 from __future__ import annotations
 
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,14 @@ from ..models import ConstraintViolation  # noqa: E402
 
 # Minimum length for the auditor's ai_reasoning — Rule 4 wants real reasoning
 _MIN_REASONING_CHARS = 40
+
+# ── Deterministic severity matrix (Master Patch Part 3) ──────────────
+# Pure-code mathematical contract. The LLM cannot bypass this via prompt
+# injection — if its severity_label disagrees with the amount, the
+# validation pipeline issues a self-healing retry with the specific
+# violation embedded in the retry message.
+_SEVERITY_LOW_MAX:   Decimal = Decimal("2000")    # exclusive upper bound for LOW
+_SEVERITY_HIGH_MAX:  Decimal = Decimal("15000")   # inclusive upper bound for HIGH
 
 
 def _violation(field: str, rule: str, value: Any, expected: str) -> ConstraintViolation:
@@ -124,31 +133,67 @@ def check_decision_consistency(
     return []
 
 
-def check_persistence_happened(
-    output: dict, *, persist: bool = True,
-) -> list[ConstraintViolation]:
-    """If the decision is APPROVED or REJECTED, the auditor must have actually
-    called create_claim. The agent code overwrites persisted_claim_id with the
-    real tool result (or None if never called), so a null here means the LLM
-    hallucinated its answer without persisting.
+def check_severity_matches_amount(output: dict) -> list[ConstraintViolation]:
+    """Deterministic severity ↔ amount contract (Master Patch Part 3).
 
-    When `persist=False` (re-analysis / eval-harness flow), we explicitly
-    told the auditor NOT to call create_claim, so this check is skipped.
+    Closes the indirect-prompt-injection vector where a malicious PDF
+    tricks the auditor LLM into emitting a downgraded `severity_label`
+    (e.g. labelling a total-loss claim as LOW). The classification is
+    derived in pure code from the monetary amount — the LLM has no say.
+
+    Contract (Decimal precision, never float):
+        amount < 2000                       → LOW
+        2000 <= amount <= 15000             → HIGH
+        amount > 15000                      → TOTAL_LOSS
+
+    If the agent did NOT report a monetary amount, this check is a
+    no-op — the orchestrator's MANUAL_REVIEW escalation handles the
+    ambiguous case downstream.
     """
-    if not persist:
-        return []  # advisory mode — no row was supposed to be written
-    decision = output.get("decision")
-    if decision not in ("APPROVED", "REJECTED"):
-        return []  # MANUAL_REVIEW is allowed without persistence
-    if output.get("persisted_claim_id") is None:
+    raw_amount = output.get("reported_damage_amount")
+    if raw_amount is None:
+        return []  # nothing to anchor the contract on — skip
+
+    # The LLM may emit Decimal, str, or int. Normalise to Decimal via
+    # str() to avoid float-binary surprises (Rule 2 — never trust float).
+    try:
+        amount = Decimal(str(raw_amount))
+    except (InvalidOperation, ValueError, TypeError):
         return [_violation(
-            field="persisted_claim_id",
-            rule="must_call_create_claim",
-            value=None,
+            field="reported_damage_amount",
+            rule="must_be_decimal",
+            value=raw_amount,
+            expected="a Decimal-parseable string/number",
+        )]
+
+    if amount < 0:
+        # Existing ClaimSchema guard catches this on persistence, but we
+        # want a clean retry signal here rather than a 500 downstream.
+        return [_violation(
+            field="reported_damage_amount",
+            rule="must_be_non_negative",
+            value=str(amount),
+            expected=">= 0",
+        )]
+
+    if amount < _SEVERITY_LOW_MAX:
+        expected = "LOW"
+    elif amount <= _SEVERITY_HIGH_MAX:
+        expected = "HIGH"
+    else:
+        expected = "TOTAL_LOSS"
+
+    actual = output.get("severity_label")
+    if actual != expected:
+        return [_violation(
+            field="severity_label",
+            rule="severity_must_match_amount",
+            value=f"{actual} (amount={amount})",
             expected=(
-                "an integer claim_id returned by create_claim — you MUST "
-                "actually call the create_claim tool before returning a final "
-                f"decision of {decision!r}"
+                f"'{expected}' — by the deterministic matrix "
+                f"(<{_SEVERITY_LOW_MAX}=LOW, "
+                f"{_SEVERITY_LOW_MAX}-{_SEVERITY_HIGH_MAX}=HIGH, "
+                f">{_SEVERITY_HIGH_MAX}=TOTAL_LOSS)"
             ),
         )]
     return []
@@ -179,17 +224,16 @@ def check_next_action_matches_decision(output: dict) -> list[ConstraintViolation
 def validate_claim_decision(
     output: Any,
     triage_report: dict | None = None,
-    *,
-    persist: bool = True,
+    **_ignored: Any,
 ) -> list[ConstraintViolation]:
     """Run every ClaimDecision validator. Return aggregated violations.
 
     Args:
-        output:         Auditor's ClaimDecision dict.
-        triage_report:  Original analyst output (used for cross-reference checks).
-        persist:        Whether the agent was instructed to call create_claim.
-                        When False (advisory / re-analysis / eval-harness),
-                        the persistence-related assertions are skipped.
+        output:        Auditor's TriageProposal dict (no persistence fields).
+        triage_report: Original analyst output (used for cross-reference checks).
+
+    Note: `persist` kwarg is no longer accepted — the agent never calls
+    create_claim. The orchestrator handler owns all DB writes (Rule 6).
     """
     violations = check_is_dict(output)
     if violations:
@@ -199,6 +243,8 @@ def validate_claim_decision(
     violations.extend(check_reasoning_quality(output))
     violations.extend(check_policy_id_belongs_to_user(output, triage_report))
     violations.extend(check_decision_consistency(output, triage_report))
-    violations.extend(check_persistence_happened(output, persist=persist))
     violations.extend(check_next_action_matches_decision(output))
+    # Master Patch Part 3 — deterministic severity matrix runs LAST so
+    # earlier shape/schema violations surface first in the retry message.
+    violations.extend(check_severity_matches_amount(output))
     return violations

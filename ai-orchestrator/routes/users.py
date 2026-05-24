@@ -43,6 +43,7 @@ from packages.common.business_rules import (  # noqa: E402
 )
 
 from auth                  import Role, UserPrincipal, require_role  # noqa: E402
+from core.mcp_client        import MCPClientError                     # noqa: E402
 from routes.mcp_router      import MCPRouter, get_mcp_router          # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -88,8 +89,17 @@ async def get_user(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"User {user_id} not found",
         )
+    except MCPClientError as e:
+        # Master Patch Part 4 — internal detail to logs only.
+        logger.error(
+            "GET /users/%s upstream failure | internal=%s",
+            user_id, e.internal, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=e.public,
+        )
     except Exception as e:
-        logger.error(f"GET /users/{user_id} upstream error: {e}")
+        logger.error(f"GET /users/{user_id} upstream error: {e!r}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal error retrieving user",
@@ -138,8 +148,18 @@ async def get_user_policies(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"User {user_id} not found",
         )
+    except MCPClientError as e:
+        logger.error(
+            "GET /users/%s/policies upstream failure | internal=%s",
+            user_id, e.internal, exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=e.public,
+        )
     except Exception as e:
-        logger.error(f"GET /users/{user_id}/policies upstream error: {e}")
+        logger.error(
+            f"GET /users/{user_id}/policies upstream error: {e!r}", exc_info=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal error retrieving policies",

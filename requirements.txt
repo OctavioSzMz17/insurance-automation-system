@@ -17,6 +17,12 @@ pyyaml==6.0.2
 # Validation
 pydantic==2.11.4
 
+# Bounded TTL caches — Master Patch Part 2 (request-owner registry, etc.)
+cachetools==5.5.0
+
+# Redis async client — Fix A (shared state across replicas)
+redis==5.2.1
+
 # MCP SDK — Model Context Protocol server framework
 mcp==1.9.4
 
