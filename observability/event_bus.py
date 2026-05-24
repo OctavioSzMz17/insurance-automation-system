@@ -35,6 +35,7 @@ Failure modes:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -46,6 +47,9 @@ logger = logging.getLogger(__name__)
 _QUEUE_MAXSIZE   = 256
 _IDLE_TIMEOUT_S  = 300  # 5 min
 _GC_INTERVAL_S   = 60
+# Fix #78 — Redis history list TTL.  Must outlive the longest pipeline so
+# a late SSE subscriber can replay all events from the list.
+_REDIS_HISTORY_TTL = _IDLE_TIMEOUT_S   # 300 s — same as the in-memory idle timeout
 
 
 # ── Event schema ─────────────────────────────────────────────────
@@ -109,16 +113,46 @@ class _BusEntry:
 
 
 class EventBus:
-    """Process-local pub/sub. Not safe across replicas — use Redis for that."""
+    """Pub/sub event bus for SSE streaming.
+
+    Backed by in-process asyncio.Queue per request_id (single-replica).
+    Fix #78 — when a Redis client is wired via set_redis(), publish()
+    additionally pushes events to a Redis List (replay) + Pub/Sub channel
+    (live), and subscribe() reads from Redis instead of the local queue.
+    This makes the EventBus work correctly across multiple orchestrator
+    replicas without requiring Kafka or a message broker.
+    """
 
     def __init__(self) -> None:
         self._entries: dict[str, _BusEntry] = {}
         self._gc_task: Optional[asyncio.Task[None]] = None
+        self._redis = None   # redis.asyncio.Redis | None; set via set_redis()
+
+    # ── Redis wiring ─────────────────────────────────────────────
+
+    def set_redis(self, client) -> None:
+        """Wire a Redis client for multi-replica Pub/Sub support.
+
+        Fix #78 — call this at app startup (after the Redis client is
+        ready) before the first publish/subscribe call.  Safe to call
+        with None (disables Redis, falls back to in-memory).
+
+        Args:
+            client: redis.asyncio.Redis client, or None.
+        """
+        self._redis = client
+        backend = "redis+pubsub" if client is not None else "in-memory"
+        logger.info("EventBus backend configured | %s", backend)
 
     # ── publish ──────────────────────────────────────────────────
 
     def publish(self, request_id: str, event: StreamEvent) -> None:
         """Non-blocking put. Never raises; never blocks the caller.
+
+        Always writes to the in-process asyncio.Queue (local subscribers
+        on this replica). When Redis is configured, also fires-and-forgets
+        a coroutine that pushes to the Redis history list + Pub/Sub channel
+        so subscribers on OTHER replicas receive the event.
 
         Backpressure: if the per-request queue is full, drop the
         OLDEST event (typical of streaming dashboards — recency wins).
@@ -146,6 +180,17 @@ class EventBus:
                 request_id,
             )
 
+        # Fix #78 — fire-and-forget Redis publish (never blocks the caller).
+        if self._redis is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(
+                    self._publish_redis(request_id, event),
+                    name=f"event_bus_redis_pub_{request_id[:8]}",
+                )
+            except RuntimeError:
+                pass  # no running loop (sync tests / import time)
+
     # ── subscribe ────────────────────────────────────────────────
 
     async def subscribe(
@@ -156,6 +201,9 @@ class EventBus:
         require_existing: bool = True,
     ) -> AsyncIterator[Optional[StreamEvent]]:
         """Async iterator over events for `request_id`.
+
+        Fix #78 — delegates to Redis Pub/Sub backend when available so
+        any orchestrator replica can serve this SSE stream.
 
         Yields:
             - `StreamEvent` for each published event
@@ -183,6 +231,16 @@ class EventBus:
         flows through, or when the consumer breaks out of the loop.
         Cleans up the queue on exit.
         """
+        # Fix #78 — Redis backend takes priority for multi-replica support.
+        if self._redis is not None:
+            async for event in self._subscribe_redis(
+                request_id, keepalive_s, require_existing
+            ):
+                yield event
+            return
+
+        # ── Original in-memory path ──────────────────────────────
+
         # Master Patch Part 4 — fail-fast for unknown request_ids.
         if require_existing:
             entry = self._entries.get(request_id)
@@ -214,6 +272,129 @@ class EventBus:
             current = self._entries.get(request_id)
             if current is entry:
                 self._entries.pop(request_id, None)
+
+    # ── Redis backend (Fix #78) ───────────────────────────────────
+
+    async def _publish_redis(self, request_id: str, event: StreamEvent) -> None:
+        """Push event to Redis history list AND Pub/Sub channel.
+
+        Order: RPUSH (history) before PUBLISH (channel) guarantees that
+        any subscriber that subscribes to the channel AFTER our rpush will
+        see the event in history — no events are silently lost.
+
+        Args:
+            request_id: Pipeline correlation id (used as the key suffix).
+            event:      Serialisable StreamEvent dict.
+        """
+        try:
+            serialized  = json.dumps(event, default=str)
+            channel     = f"events:{request_id}"
+            history_key = f"event_history:{request_id}"
+            pipe = self._redis.pipeline()
+            pipe.rpush(history_key, serialized)
+            pipe.expire(history_key, _REDIS_HISTORY_TTL)
+            pipe.publish(channel, serialized)
+            await pipe.execute()
+        except Exception as exc:
+            logger.warning(
+                "event_bus.redis | _publish_redis failed | request_id=%s err=%s",
+                request_id, exc,
+            )
+
+    async def _subscribe_redis(
+        self,
+        request_id:      str,
+        keepalive_s:     float,
+        require_existing: bool,
+    ) -> AsyncIterator[Optional[StreamEvent]]:
+        """Subscribe using Redis Pub/Sub with history-list replay.
+
+        Ordering guarantees no events are dropped or double-yielded:
+
+            1. Subscribe to Pub/Sub channel (starts buffering live messages).
+            2. LRANGE history_key (replay everything published before now).
+            3. Drain the Pub/Sub buffer (those messages are duplicates of
+               history — both were written in the same RPUSH+PUBLISH pipe).
+            4. Yield genuinely new messages from the channel.
+
+        This is safe because _publish_redis does RPUSH before PUBLISH.
+        Any message in the Pub/Sub buffer that arrived after step 1 but
+        before step 2 is already in the history list and is replayed in
+        step 2; step 3 discards it from the buffer to avoid duplication.
+
+        Args:
+            request_id:       Pipeline correlation id.
+            keepalive_s:      Timeout before yielding a None keepalive tick.
+            require_existing: Return immediately when no history exists.
+        """
+        channel     = f"events:{request_id}"
+        history_key = f"event_history:{request_id}"
+
+        # 1. Subscribe first — begin buffering live messages.
+        pubsub = self._redis.pubsub()
+        await pubsub.subscribe(channel)
+
+        try:
+            # 2a. require_existing guard — mirror the in-memory path.
+            if require_existing:
+                history_len = await self._redis.llen(history_key)
+                if history_len == 0:
+                    logger.info(
+                        "event_bus.subscribe_redis | no history require_existing=True "
+                        "| request_id=%s; closing",
+                        request_id,
+                    )
+                    return
+
+            # 2b. Replay full history (may be 0 items if pipeline just started).
+            history = await self._redis.lrange(history_key, 0, -1)
+            for raw in history:
+                try:
+                    ev: StreamEvent = json.loads(
+                        raw.decode() if isinstance(raw, bytes) else raw
+                    )
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+                yield ev
+                if ev.get("type") in ("pipeline.done", "pipeline.error"):
+                    return
+
+            # 3. Drain Pub/Sub buffer — discard duplicates that overlap history.
+            while True:
+                msg = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=0,
+                )
+                if msg is None:
+                    break
+
+            # 4. Live messages — yield until pipeline finishes or caller exits.
+            while True:
+                msg = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=keepalive_s,
+                )
+                if msg is None:
+                    yield None   # keepalive tick — no message in keepalive_s window
+                    continue
+
+                try:
+                    data = msg["data"]
+                    ev = json.loads(data.decode() if isinstance(data, bytes) else data)
+                except (json.JSONDecodeError, KeyError, AttributeError):
+                    continue
+
+                yield ev
+                if ev.get("type") in ("pipeline.done", "pipeline.error"):
+                    return
+
+        finally:
+            try:
+                await pubsub.unsubscribe(channel)
+            except Exception:
+                pass
+            try:
+                await pubsub.aclose()
+            except Exception:
+                pass
 
     # ── lifecycle / housekeeping ────────────────────────────────
 

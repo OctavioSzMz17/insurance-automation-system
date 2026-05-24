@@ -150,10 +150,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # E1.1 — start the event-bus GC so orphaned per-request queues
     # don't pile up if a publisher never gets a subscriber.
+    # Fix #78 — wire Redis Pub/Sub backend for multi-replica SSE support.
     bus = get_event_bus()
+    bus.set_redis(redis_client)
     bus.start_gc()
     app.state.event_bus = bus
-    logger.info("EventBus ready (gc=on)")
+    logger.info(
+        "EventBus ready | gc=on redis=%s",
+        "yes" if redis_client is not None else "no",
+    )
 
     # Master Patch Part 4 — bounded, thread-safe stream-ticket store.
     # Eradicates the plain dict that allowed unbounded growth + O(N)

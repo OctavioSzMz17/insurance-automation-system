@@ -132,6 +132,72 @@ def _assert_pdf_path_safe(pdf_path: str) -> None:
         )
 
 
+# ── POST /claims/submit — per-user rate limit (Fix #79) ─────────────────────
+
+_SUBMIT_RATE_LIMIT  = 10   # max submissions per window per user
+_SUBMIT_RATE_WINDOW = 60   # sliding window (seconds)
+
+
+async def _check_submit_rate_limit(request: Request, sub: str) -> None:
+    """Enforce ≤ 10 claim submissions per 60 s per user (Redis sorted-set).
+
+    Uses the same ZADD sliding-window pattern as approval_validators.py
+    for consistency. Skips — with a WARNING — when Redis is not configured
+    so that single-replica dev environments are never broken.
+
+    Fix #79 — closes the unbounded-pipeline-load vector: without this
+    guard a single ANALYST credential could spawn arbitrarily many
+    expensive agent pipelines, exhausting CPU/DB connections.
+
+    Args:
+        request: FastAPI Request — used to reach app.state.redis.
+        sub:     JWT sub (email) of the authenticated user.
+
+    Raises:
+        HTTPException 429: rate limit exceeded.
+    """
+    redis = getattr(request.app.state, "redis", None)
+    if redis is None:
+        logger.warning(
+            "submit rate-limit skipped — no Redis configured | sub=%s", sub,
+        )
+        return
+
+    key    = f"submit_rate:{sub}"
+    now_ts = time.time()
+    cutoff = now_ts - _SUBMIT_RATE_WINDOW
+
+    pipe = redis.pipeline()
+    pipe.zremrangebyscore(key, "-inf", cutoff)
+    pipe.zcard(key)
+    _, count = await pipe.execute()
+
+    if count >= _SUBMIT_RATE_LIMIT:
+        oldest = await redis.zrange(key, 0, 0, withscores=True)
+        retry_after = _SUBMIT_RATE_WINDOW
+        if oldest:
+            oldest_ts = oldest[0][1]
+            retry_after = max(1, int(oldest_ts + _SUBMIT_RATE_WINDOW - now_ts))
+        logger.warning(
+            "submit rate-limit BLOCKED | sub=%s count=%d limit=%d retry_after=%ds",
+            sub, count, _SUBMIT_RATE_LIMIT, retry_after,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"Submission rate limit exceeded "
+                f"({_SUBMIT_RATE_LIMIT} per {_SUBMIT_RATE_WINDOW}s). "
+                f"Retry after {retry_after}s."
+            ),
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    pipe2 = redis.pipeline()
+    pipe2.zadd(key, {str(now_ts): now_ts})
+    pipe2.expire(key, _SUBMIT_RATE_WINDOW + 5)
+    await pipe2.execute()
+
+
 # ── POST /claims/submit ──────────────────────────────────────────
 
 @router.post(
@@ -160,6 +226,11 @@ async def submit_claim(
         f"POST /claims/submit | request_id={request_id} actor={user.sub} "
         f"role={user.role.value} pdf_path={body.pdf_path}"
     )
+
+    # Fix #79 — per-user submission rate limit (10/min via Redis ZADD).
+    # Placed BEFORE the pipeline starts so rejected requests never allocate
+    # agent resources.
+    await _check_submit_rate_limit(request, user.sub)
 
     # Fix B — defence-in-depth: even after the Pydantic validator rejects
     # '..' and relative paths, confirm the resolved path is inside the
@@ -321,6 +392,9 @@ async def submit_claim_upload(
         f"POST /claims/submit-upload | request_id={request_id} actor={user.sub} "
         f"role={user.role.value} filename={pdf.filename}"
     )
+
+    # Fix #79 — same per-user submission rate limit as /submit (10/min).
+    await _check_submit_rate_limit(request, user.sub)
 
     # Master Patch Part 2 — bind ownership immediately so the SSE stream
     # subscriber path can enforce tenant isolation, even before we've
@@ -852,19 +926,53 @@ _MAX_STREAMS_PER_SUB:   int   = 3
 # Pipelines that legitimately exceed this should re-subscribe with a
 # fresh ticket; the client UI auto-handles that.
 _MAX_STREAM_LIFETIME_S: float = 120.0
+# Fix #77 — Redis key TTL for the stream counter. Slightly longer than the
+# max stream lifetime so pod crashes don't leave stale counts forever.
+_STREAM_COUNT_TTL: int = int(_MAX_STREAM_LIFETIME_S) + 30
 
 _active_streams_lock: Lock = Lock()
 _active_streams_by_sub: Counter[str] = Counter()
 
 
-def _stream_admit(sub: str) -> None:
-    """Reserve one concurrent-stream slot for `sub`. 429 on overflow."""
+async def _stream_admit(sub: str, redis=None) -> None:
+    """Reserve one concurrent-stream slot for `sub`. 429 on overflow.
+
+    Fix #77 — uses Redis INCR when available so the cap is enforced
+    consistently across all orchestrator replicas. Falls back to the
+    in-memory Counter when Redis is not configured (dev/test).
+
+    Args:
+        sub:   JWT subject of the connecting user.
+        redis: redis.asyncio.Redis client from app.state, or None.
+    """
+    if redis is not None:
+        key   = f"stream_count:{sub}"
+        count = await redis.incr(key)
+        if count > _MAX_STREAMS_PER_SUB:
+            await redis.decr(key)   # rollback — INCR is not a reservation
+            logger.warning(
+                "SSE stream DENIED | sub=%s active=%d cap=%d backend=redis",
+                sub, count - 1, _MAX_STREAMS_PER_SUB,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    f"Too many concurrent SSE streams "
+                    f"(cap={_MAX_STREAMS_PER_SUB} per user)"
+                ),
+                headers={"Retry-After": "5"},
+            )
+        # Refresh the pod-crash-safety TTL on every successful admit.
+        await redis.expire(key, _STREAM_COUNT_TTL)
+        return
+
+    # In-memory fallback (single-replica dev/test).
     with _active_streams_lock:
         current = _active_streams_by_sub[sub]
         if current >= _MAX_STREAMS_PER_SUB:
             logger.warning(
-                f"SSE stream DENIED | sub={sub} active={current} "
-                f"cap={_MAX_STREAMS_PER_SUB}"
+                "SSE stream DENIED | sub=%s active=%d cap=%d backend=in-memory",
+                sub, current, _MAX_STREAMS_PER_SUB,
             )
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -877,8 +985,25 @@ def _stream_admit(sub: str) -> None:
         _active_streams_by_sub[sub] = current + 1
 
 
-def _stream_release(sub: str) -> None:
-    """Release one slot. Safe to call multiple times — clamps at 0."""
+async def _stream_release(sub: str, redis=None) -> None:
+    """Release one concurrent-stream slot. Safe to call multiple times.
+
+    Fix #77 — mirrors _stream_admit; decrements the Redis INCR counter
+    and deletes the key when it reaches zero to avoid stale single-digit
+    counts persisting past the TTL.
+
+    Args:
+        sub:   JWT subject whose slot is being freed.
+        redis: redis.asyncio.Redis client from app.state, or None.
+    """
+    if redis is not None:
+        key       = f"stream_count:{sub}"
+        new_count = await redis.decr(key)
+        if new_count <= 0:
+            await redis.delete(key)
+        return
+
+    # In-memory fallback.
     with _active_streams_lock:
         new_value = _active_streams_by_sub[sub] - 1
         if new_value <= 0:
@@ -950,7 +1075,9 @@ async def _consume_ticket(
         )
     # Defence-in-depth — the store also TTL-evicts, but a ticket that
     # just slipped through the eviction window is still rejectable here.
-    if time.monotonic() > ticket.expires_at:
+    # Fix #80 — compare wall-clock (time.time()) to match the wall-clock
+    # expires_at stored by both local and Redis backends.
+    if time.time() > ticket.expires_at:
         logger.warning(
             f"stream-ticket rejected | ticket={ticket_id[:8]}… reason=expired"
         )
@@ -1223,10 +1350,14 @@ async def stream_claim_events(
 ) -> StreamingResponse:
     user = await _consume_ticket(request, ticket, request_id)
 
+    # Fix #77 — capture the Redis client once so both _stream_admit and
+    # the generator's _stream_release closure share the same reference.
+    _redis = getattr(request.app.state, "redis", None)
+
     # Master Patch Part 4 — reserve a concurrent-stream slot for this
     # subject BEFORE constructing the generator. If admission fails
     # (429) we return without ever materialising a bus entry.
-    _stream_admit(user.sub)
+    await _stream_admit(user.sub, redis=_redis)
 
     logger.info(
         f"GET /claims/stream/{request_id} | actor={user.sub} role={user.role.value} "
@@ -1312,8 +1443,8 @@ async def stream_claim_events(
         finally:
             # Always release the concurrent-stream slot, even on timeout
             # or client disconnect. This is the only place the counter
-            # is decremented.
-            _stream_release(user.sub)
+            # is decremented. Fix #77 — async release (Redis DECR or in-memory).
+            await _stream_release(user.sub, redis=_redis)
             if not yielded_anything and not timed_out:
                 # Master Patch Part 4 — subscriber connected against an
                 # unknown / dead request_id. Emit one diagnostic event

@@ -6,7 +6,9 @@ TTL. When REDIS_URL is absent, falls back to the original cachetools
 TTLCache + threading.Lock (single-replica dev / test).
 
 Ticket payload stored in Redis: JSON with sub, role, request_id,
-expires_at (monotonic approximated via wall-clock offset).
+expires_at (wall-clock epoch via time.time() — safe for cross-process
+comparison; monotonic clocks are process-local and must not cross the
+Redis boundary).
 
 Rules applied:
     Rule 7  — Auth-layer infrastructure owned by ai-orchestrator/auth
@@ -62,7 +64,7 @@ class StreamTicket:
     request_id: str
     sub:        str
     role:       Role
-    expires_at: float   # time.monotonic() deadline
+    expires_at: float   # time.time() wall-clock deadline (epoch seconds)
 
 
 # ── Store ─────────────────────────────────────────────────────────
@@ -160,7 +162,7 @@ class StreamTicketStore:
             )
 
         ticket_id  = str(uuid.uuid4())
-        expires_at = time.monotonic() + self._ttl
+        expires_at = time.time() + self._ttl   # Fix #80 — wall-clock, safe across replicas
         payload = json.dumps({
             "request_id": request_id,
             "sub":        sub,
@@ -224,7 +226,7 @@ class StreamTicketStore:
                 request_id=request_id,
                 sub=sub,
                 role=role,
-                expires_at=time.monotonic() + self._ttl,
+                expires_at=time.time() + self._ttl,   # Fix #80 — wall-clock
             )
             return ticket_id
 
