@@ -36,25 +36,29 @@ _ALLOWED_STATUSES = {
 
 
 async def list_claims(
-    status: str | None = None,
-    limit: int = 100,
-    offset: int = 0,
+    status:     str | None = None,
+    limit:      int = 100,
+    offset:     int = 0,
+    user_email: str | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch a list of claim rows ordered by most-recent-first.
 
+    Fix #70 — `user_email` enables tenant isolation for ANALYST callers.
+    When set, only claims whose owner's email matches `user_email` are
+    returned (JOIN against the users table, enforced at DB level).
+
     Args:
-        status: Optional `claim_status` filter (e.g. "MANUAL_REVIEW"). If
-            omitted, all statuses are returned.
-        limit:  Max rows to return (1-500, default 100).
-        offset: Skip this many rows before returning (default 0).
+        status:     Optional `claim_status` filter (e.g. "MANUAL_REVIEW").
+        limit:      Max rows to return (1-500, default 100).
+        offset:     Skip this many rows before returning (default 0).
+        user_email: When set, restrict results to claims owned by this
+                    email address. Passed by orchestrator for ANALYST role.
 
     Returns:
-        A list of dicts shaped like `get_claim_by_id` output. Empty list
-        when no rows match the filter.
+        A list of dicts shaped like `get_claim_by_id` output.
 
     Raises:
-        ValueError: If `status` is not a recognised claim_status value or
-            limit/offset are out of range.
+        ValueError:   If params are out of range or status is unknown.
         RuntimeError: If the database query fails.
     """
     # ── Input validation ─────────────────────────────────────
@@ -69,26 +73,50 @@ async def list_claims(
         raise ValueError(f"offset must be >= 0, got {offset}")
 
     logger.info(
-        f"list_claims called | status={status} limit={limit} offset={offset}"
+        "list_claims called | status=%s limit=%d offset=%d user_email=%s",
+        status, limit, offset,
+        "<filtered>" if user_email else "all",
     )
 
-    # ── Build query with optional WHERE ──────────────────────
-    sql = """
-        SELECT claim_id, user_id, policy_id, incident_date,
-               incident_description, incident_location,
-               severity_label::text AS severity_label,
-               reported_damage_amount,
-               claim_status::text   AS claim_status,
-               ai_reasoning,
-               created_at, updated_at
-        FROM   claims
-    """
+    # ── Build query ───────────────────────────────────────────
+    # When user_email is provided, JOIN users so the filter is applied
+    # at the DB level — no post-fetch slicing (Fix #70).
     params: dict[str, Any] = {"limit": limit, "offset": offset}
+    conditions: list[str] = []
+
+    if user_email is not None:
+        from_clause = """
+            FROM   claims c
+            JOIN   users  u ON u.user_id = c.user_id
+        """
+        select_prefix = "c."
+        conditions.append("LOWER(u.email) = LOWER(:user_email)")
+        params["user_email"] = user_email
+    else:
+        from_clause    = "FROM claims c"
+        select_prefix  = "c."
+
     if status is not None:
-        sql += " WHERE claim_status = :status"
+        conditions.append(f"{select_prefix}claim_status = :status")
         params["status"] = status
-    sql += " ORDER BY created_at DESC NULLS LAST, claim_id DESC"
-    sql += " LIMIT :limit OFFSET :offset"
+
+    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    sql = f"""
+        SELECT {select_prefix}claim_id,   {select_prefix}user_id,
+               {select_prefix}policy_id,  {select_prefix}incident_date,
+               {select_prefix}incident_description, {select_prefix}incident_location,
+               {select_prefix}severity_label::text        AS severity_label,
+               {select_prefix}reported_damage_amount,
+               {select_prefix}claim_status::text          AS claim_status,
+               {select_prefix}ai_reasoning,
+               {select_prefix}created_at, {select_prefix}updated_at
+        {from_clause}
+        {where_clause}
+        ORDER BY {select_prefix}created_at DESC NULLS LAST,
+                 {select_prefix}claim_id    DESC
+        LIMIT :limit OFFSET :offset
+    """
 
     try:
         engine = get_engine()

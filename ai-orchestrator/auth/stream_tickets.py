@@ -136,10 +136,18 @@ class StreamTicketStore:
     # ── Redis backend ─────────────────────────────────────────────
 
     async def _mint_redis(self, sub: str, role: Role, request_id: str) -> str:
-        # Count live tickets for this sub via marker keys
+        # Fix #68 — count live marker keys via non-blocking SCAN cursor loop.
+        # KEYS is O(N) and blocks Redis; SCAN spreads the cost over iterations.
         pattern = f"ticket_sub:{sub}:*"
-        existing_keys = await self._redis.keys(pattern)
-        current = len(existing_keys)
+        current = 0
+        cursor = 0
+        while True:
+            cursor, keys = await self._redis.scan(
+                cursor=cursor, match=pattern, count=100,
+            )
+            current += len(keys)
+            if cursor == 0:
+                break
 
         if current >= self._max_per_sub:
             logger.warning(

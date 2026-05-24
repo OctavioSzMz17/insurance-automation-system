@@ -167,6 +167,7 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
                 status=arguments.get("status"),
                 limit=int(arguments.get("limit", 100)),
                 offset=int(arguments.get("offset", 0)),
+                user_email=arguments.get("user_email"),   # Fix #70 tenant filter
             )
         elif name == "update_claim_status":
             result = await update_claim_status(

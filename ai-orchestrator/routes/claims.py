@@ -516,6 +516,10 @@ async def list_claims_endpoint(
         f"status={status_filter} limit={limit} offset={offset}"
     )
 
+    # Fix #70 — ANALYST role is scoped to their own claims (email = JWT sub).
+    # AUDITOR and ADMIN receive all claims unfiltered.
+    analyst_email = user.sub if user.role == Role.ANALYST else None
+
     try:
         rows = await mcp_router.call(
             "claims", "list_claims",
@@ -523,6 +527,7 @@ async def list_claims_endpoint(
             status=status_filter,
             limit=limit,
             offset=offset,
+            **({"user_email": analyst_email} if analyst_email else {}),
         )
     except ValueError as e:
         raise HTTPException(
@@ -605,6 +610,40 @@ async def get_claim_status(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal error retrieving claim",
         )
+
+    # Fix #71 — ANALYST can only read claims belonging to their own account.
+    # Resolve the claim's user_id to an email via legacy-provider and compare
+    # against the JWT sub (which equals the authenticated user's email).
+    # AUDITOR and ADMIN bypass this check.
+    if user.role == Role.ANALYST:
+        try:
+            claim_user = await mcp_router.call(
+                "legacy-provider", "get_user_by_id",
+                caller_role=user.role,
+                user_id=row["user_id"],
+            )
+            target_email = (claim_user.get("email") or "").strip().lower()
+            actor_sub    = user.sub.strip().lower()
+            if not target_email or target_email != actor_sub:
+                logger.warning(
+                    f"GET /claims/{claim_id} DENIED cross-user | "
+                    f"actor={user.sub} owner_email={target_email!r}"
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You are not authorised to view this claim",
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(
+                "GET /claims/%s ownership check failed | actor=%s err=%s",
+                claim_id, user.sub, exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Could not verify claim ownership",
+            )
 
     return ClaimStatusResponse(**row)
 

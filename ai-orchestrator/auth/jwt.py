@@ -12,6 +12,7 @@ POST /auth/token endpoint (Rule 7 / Rule 8).
 from __future__ import annotations
 
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,7 @@ def create_access_token(
     payload: dict[str, Any] = {
         "sub":  sub,
         "role": role.value,
+        "jti":  str(uuid.uuid4()),   # Fix #69 — unique token ID for revocation
         "iat":  int(now.timestamp()),
         "exp":  int((now + timedelta(hours=ttl)).timestamp()),
     }

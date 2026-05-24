@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .jwt   import decode_jwt
@@ -32,9 +32,18 @@ _bearer = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
+    request:     Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> UserPrincipal:
-    """Resolve the request's authenticated user from its bearer token."""
+    """Resolve the request's authenticated user from its bearer token.
+
+    Fix #69 — after signature verification, checks the token's `jti`
+    against the Redis JTI revocation set. A revoked token is rejected
+    with 401 even if the signature is valid and the token has not expired.
+    Falls back gracefully when Redis is unavailable (logs a warning, does
+    not block the request — fail-open so a Redis outage doesn't lock out
+    all users).
+    """
     if credentials is None or not credentials.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -43,6 +52,28 @@ async def get_current_user(
         )
 
     payload = decode_jwt(credentials.credentials)
+
+    # Fix #69 — JTI revocation check via Redis blocklist.
+    jti = payload.get("jti")
+    if jti:
+        redis = getattr(request.app.state, "redis", None)
+        if redis is not None:
+            try:
+                revoked = await redis.get(f"revoked_jti:{jti}")
+                if revoked:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Token has been revoked",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "JTI revocation check failed (Redis error) — fail-open | jti=%s err=%s",
+                    jti, exc,
+                )
     sub      = payload.get("sub")
     role_str = payload.get("role")
     if not sub or not role_str:
