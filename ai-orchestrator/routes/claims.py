@@ -858,11 +858,12 @@ def _get_ticket_store(request: Request) -> StreamTicketStore:
     return store
 
 
-def _mint_ticket(request: Request, request_id: str, user: UserPrincipal) -> str:
+async def _mint_ticket(request: Request, request_id: str, user: UserPrincipal) -> str:
     """Mint a ticket via the bounded store. Maps quota errors to 429.
 
     Master Patch Part 4 — store enforces global maxsize=10k, TTL=30s,
     and per-sub cap of 20 concurrent unconsumed tickets.
+    Fix #64 — declared async so `await store.mint(...)` inside is legal.
     """
     store = _get_ticket_store(request)
     try:
@@ -1146,7 +1147,7 @@ async def create_stream_ticket(
             detail="You do not own this pipeline",
         )
 
-    ticket_id = _mint_ticket(request, request_id, user)
+    ticket_id = await _mint_ticket(request, request_id, user)
     return StreamTicketResponse(ticket=ticket_id, scoped_to=request_id)
 
 

@@ -86,6 +86,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.environment, settings.llm_provider, settings.model_name,
     )
 
+    # Fix #65 — refuse to start in non-dev environments with the default
+    # or a short JWT secret. An attacker who reads the source can forge
+    # admin tokens if this is not enforced.
+    _PROD_ENVS = {"production", "prod", "staging"}
+    _JWT_DEFAULT = "dev-only-replace-me"
+    if settings.environment.lower() in _PROD_ENVS:
+        if (
+            settings.jwt_secret_key == _JWT_DEFAULT
+            or len(settings.jwt_secret_key) < 32
+        ):
+            raise RuntimeError(
+                f"JWT_SECRET_KEY is unset or uses the default placeholder "
+                f"(env={settings.environment}). Set a strong secret of at "
+                f"least 32 characters in .env before deploying."
+            )
+    elif settings.jwt_secret_key == _JWT_DEFAULT:
+        logger.warning(
+            "JWT_SECRET_KEY is using the dev placeholder — "
+            "replace before deploying to any shared environment"
+        )
+
     # Fix A — initialise Redis client (None when REDIS_URL is not set).
     redis_client = await create_redis_client(settings.redis_url)
     app.state.redis = redis_client
@@ -175,13 +196,16 @@ app = FastAPI(
 # OPTIONS preflight requests (helps when correlating CORS bugs).
 app.add_middleware(TraceIdMiddleware)
 
-# Permissive CORS for development — C1.4 / C1.5 will tighten this.
+# Fix #66 — CORS origins now come from CORS_ALLOWED_ORIGINS in .env.
+# Wildcard "*" is never used; falls back to localhost only when the var
+# is unset (safe for local dev, refuses cross-origin in production).
+_cors_settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["X-Trace-Id"],  # let browsers read it for debugging
+    allow_origins=_cors_settings.cors_origins_list,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Trace-Id"],
+    expose_headers=["X-Trace-Id"],
 )
 
 # Mount routers

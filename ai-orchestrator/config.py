@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -78,10 +77,31 @@ class Settings(BaseSettings):
     # ── Agent / pipeline ──────────────────────────────────────────
     max_retry_attempts: int = Field(default=3, alias="MAX_RETRY_ATTEMPTS")
 
+    # ── CORS (Fix #66) ────────────────────────────────────────────
+    # Comma-separated list of allowed browser origins stored as a raw
+    # string (pydantic-settings tries JSON-decode on list[str] fields
+    # before validators run, breaking comma-separated values).
+    # Use settings.cors_origins_list for the parsed list.
+    # Example: CORS_ALLOWED_ORIGINS=http://localhost:3000,https://app.insureai.io
+    cors_allowed_origins: str = Field(
+        default="http://localhost:3000,http://localhost:8000",
+        alias="CORS_ALLOWED_ORIGINS",
+    )
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Return CORS_ALLOWED_ORIGINS as a parsed list of stripped strings."""
+        return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
+
     # ── JWT / RBAC (Rule 7) ───────────────────────────────────────
     jwt_secret_key:       str = Field(default="dev-only-replace-me", alias="JWT_SECRET_KEY")
     jwt_algorithm:        str = Field(default="HS256",                alias="JWT_ALGORITHM")
     jwt_expiration_hours: int = Field(default=24,                     alias="JWT_EXPIRATION_HOURS")
+
+    # Optional aud/iss claims validated by decode_jwt when non-empty.
+    # Set in production to bind tokens to this specific service.
+    jwt_audience: str = Field(default="", alias="JWT_AUDIENCE")
+    jwt_issuer:   str = Field(default="", alias="JWT_ISSUER")
 
     # ── Observability — Langfuse self-hosted (Phase D1.2) ────────
     # Set all three to opt-in. When `langfuse_public_key` is empty the

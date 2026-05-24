@@ -61,6 +61,11 @@ def create_access_token(
 def decode_jwt(token: str) -> dict[str, Any]:
     """Verify and decode a JWT. Raises 401 on any failure.
 
+    Fix #65 — validates `aud` and `iss` claims when JWT_AUDIENCE /
+    JWT_ISSUER are configured in settings. Passing `audience` to
+    python-jose causes it to reject tokens whose `aud` doesn't match,
+    closing the cross-service token reuse vector.
+
     Args:
         token: The raw JWT string (without "Bearer ").
 
@@ -69,14 +74,20 @@ def decode_jwt(token: str) -> dict[str, Any]:
 
     Raises:
         HTTPException(401): If the token is missing, expired, tampered,
-                            or signed with the wrong key.
+                            or signed with the wrong key / wrong aud/iss.
     """
     settings = get_settings()
+    options: dict[str, Any] = {}
+    audience = settings.jwt_audience or None
+    issuer   = settings.jwt_issuer   or None
     try:
         return jwt.decode(
             token,
             settings.jwt_secret_key,
             algorithms=[settings.jwt_algorithm],
+            audience=audience,
+            issuer=issuer,
+            options=options,
         )
     except JWTError as e:
         raise HTTPException(
