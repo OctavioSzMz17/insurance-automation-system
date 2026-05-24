@@ -38,6 +38,7 @@ Rules applied:
 """
 
 import logging
+import os
 import re
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -46,6 +47,13 @@ from typing import Any
 import pdfplumber
 
 logger = logging.getLogger(__name__)
+
+# Fix #84 — resolved once at module load (CLAIM_UPLOAD_DIR is set before the
+# server starts and never changes while it is running). Fallback mirrors the
+# default in ai-orchestrator/config.py so single-file dev runs still work.
+_UPLOAD_DIR: Path = Path(
+    os.environ.get("CLAIM_UPLOAD_DIR") or "/tmp/claim-uploads"
+).resolve()
 
 
 # ── Spanish month name → numeric mapping ───────────────────────────
@@ -172,7 +180,23 @@ async def extract_claim_from_pdf(pdf_path: str) -> dict[str, Any]:
         ValueError: If the PDF is corrupted or claim_id / user_id cannot
                     be extracted (these are mandatory).
     """
-    path = Path(pdf_path)
+    # Fix #84 — enforce path boundary before any file I/O (defense-in-depth).
+    # The orchestrator already validated pdf_path, but an attacker holding a
+    # leaked X-MCP-Secret could call this tool directly with an arbitrary path.
+    # Path.relative_to() raises ValueError when the resolved path escapes
+    # _UPLOAD_DIR, which avoids the startswith() prefix-collision edge case.
+    path = Path(pdf_path).resolve()
+    try:
+        path.relative_to(_UPLOAD_DIR)
+    except ValueError:
+        logger.warning(
+            "extract_claim_from_pdf blocked | path outside upload dir | pdf_path=%s",
+            pdf_path,
+        )
+        raise ValueError(
+            "pdf_path is outside the permitted upload directory"
+        )
+
     logger.info(f"extract_claim_from_pdf called | pdf_path={pdf_path}")
 
     if not path.exists():

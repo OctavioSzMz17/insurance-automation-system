@@ -40,9 +40,12 @@ Rules applied:
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 import os
+import time
+from collections import defaultdict, deque
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -62,6 +65,13 @@ logger = logging.getLogger(__name__)
 # threshold even against an attacker with local network access.
 _MIN_SECRET_BYTES = 32
 
+# Fix #85 — per-IP rate limiting on authenticated MCP requests.
+# Applied AFTER the X-MCP-Secret check so unauthenticated probes don't
+# consume quota. Values are intentionally generous (60 req/min) since the
+# only legitimate caller is the orchestrator; anything higher is anomalous.
+_RATE_LIMIT_MAX    = int(os.environ.get("MCP_RATE_LIMIT_MAX",    "60"))
+_RATE_LIMIT_WINDOW = int(os.environ.get("MCP_RATE_LIMIT_WINDOW", "60"))  # seconds
+
 _secret_str = os.environ.get("MCP_SHARED_SECRET", "")
 if not _secret_str or len(_secret_str) < _MIN_SECRET_BYTES:
     raise RuntimeError(
@@ -70,6 +80,7 @@ if not _secret_str or len(_secret_str) < _MIN_SECRET_BYTES:
         "Generate one with: openssl rand -hex 32"
     )
 
+# Boot-time cache — validated above, used as a safe fallback by _get_secret().
 _SECRET: bytes = _secret_str.encode("utf-8")
 logger.info(
     "mcp auth middleware armed | secret_len=%d source=MCP_SHARED_SECRET",
@@ -77,17 +88,75 @@ logger.info(
 )
 
 
+def _get_secret() -> bytes:
+    """Return the current MCP_SHARED_SECRET as bytes.
+
+    Fix #90 — re-reads the environment variable on every call so the secret
+    can be rotated at runtime (e.g. via a K8s volume-mounted Secret update)
+    without restarting the MCP server.
+
+    Fallback: if the env var has been removed or shortened below the minimum
+    after startup (should never happen in a well-operated cluster), the
+    boot-time validated value is returned and a WARNING is emitted.
+    The server does NOT crash mid-request — failing closed on a bad rotation
+    would lock out the orchestrator.
+    """
+    raw = os.environ.get("MCP_SHARED_SECRET", "")
+    if raw and len(raw) >= _MIN_SECRET_BYTES:
+        return raw.encode("utf-8")
+    # Degraded state — log prominently and fall back to boot-time value.
+    logger.warning(
+        "mcp auth | MCP_SHARED_SECRET missing/short in env during request "
+        "— using boot-time value; rotate and redeploy as soon as possible"
+    )
+    return _SECRET
+
+
 class MCPAuthMiddleware:
     """Pure-ASGI middleware that rejects any HTTP request without a valid
-    `X-MCP-Secret` header.
+    `X-MCP-Secret` header, then enforces a per-IP sliding-window rate limit.
 
     Runs BEFORE the Starlette router resolves the request, so /sse and
     /messages/ are protected uniformly. Non-HTTP scopes (lifespan,
     websocket) pass through untouched.
+
+    Fix #85 — rate limiting is applied only on AUTHENTICATED requests so
+    unauthenticated probes cannot exhaust the quota of legitimate callers.
     """
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
+        # Fix #85 — per-IP sliding-window state.
+        # asyncio.Lock is safe to create in __init__ from Python 3.10+
+        # (no running event loop required).
+        self._rate_windows: dict[str, deque[float]] = defaultdict(deque)
+        self._rate_lock: asyncio.Lock = asyncio.Lock()
+
+    async def _check_rate_limit(self, client_ip: str) -> bool:
+        """Return True if the request is allowed, False if rate-limited.
+
+        Uses a sliding window: entries older than _RATE_LIMIT_WINDOW seconds
+        are evicted before the count is checked. Amortises cleanup cost to O(k)
+        where k is the number of expired entries — bounded by _RATE_LIMIT_MAX.
+
+        Fix #85 — in-memory per-process store (no Redis dependency at the MCP
+        layer). Sufficient because the only legitimate caller is the single
+        orchestrator; an attacker with a leaked secret would be blocked here.
+        """
+        async with self._rate_lock:
+            now    = time.monotonic()
+            cutoff = now - _RATE_LIMIT_WINDOW
+            dq     = self._rate_windows[client_ip]
+
+            # Evict timestamps outside the current window (oldest first).
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+
+            if len(dq) >= _RATE_LIMIT_MAX:
+                return False  # over quota
+
+            dq.append(now)
+            return True
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -102,7 +171,7 @@ class MCPAuthMiddleware:
                 presented = value
                 break
 
-        if not hmac.compare_digest(presented, _SECRET):
+        if not hmac.compare_digest(presented, _get_secret()):
             client = scope.get("client") or ("?", 0)
             path = scope.get("path", "?")
             reason = "missing_header" if not presented else "invalid_secret"
@@ -113,6 +182,22 @@ class MCPAuthMiddleware:
             response = PlainTextResponse(
                 "forbidden: missing or invalid X-MCP-Secret header",
                 status_code=403,
+            )
+            await response(scope, receive, send)
+            return
+
+        # Fix #85 — rate limit check (after auth so only valid callers are counted).
+        client_ip = (scope.get("client") or ("unknown", 0))[0]
+        if not await self._check_rate_limit(client_ip):
+            logger.warning(
+                "mcp rate-limit BLOCKED | remote=%s limit=%d/%ds",
+                client_ip, _RATE_LIMIT_MAX, _RATE_LIMIT_WINDOW,
+            )
+            response = PlainTextResponse(
+                f"rate limit exceeded: max {_RATE_LIMIT_MAX} requests "
+                f"per {_RATE_LIMIT_WINDOW}s per IP",
+                status_code=429,
+                headers={"Retry-After": str(_RATE_LIMIT_WINDOW)},
             )
             await response(scope, receive, send)
             return

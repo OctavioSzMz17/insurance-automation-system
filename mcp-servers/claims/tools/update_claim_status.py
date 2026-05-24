@@ -125,6 +125,14 @@ async def update_claim_status(
                     f"manual update only allowed from {sorted(_MUTABLE_FROM)}"
                 )
 
+            # Fix #87 — block no-op transitions (e.g. MANUAL_REVIEW → MANUAL_REVIEW).
+            # These produce spurious audit-trail entries without changing any real state.
+            if new_status == str(current.claim_status):
+                raise ValueError(
+                    f"Claim {claim_id} is already in status {new_status!r} — "
+                    f"no transition needed"
+                )
+
             # 2. Apply the transition + append to ai_reasoning
             result = conn.execute(
                 text("""

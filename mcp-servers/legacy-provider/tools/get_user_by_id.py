@@ -71,7 +71,9 @@ async def get_user_by_id(user_id: int) -> dict[str, Any]:
             "name":    str(row.name),
             "email":   str(row.email),
         }
-        logger.info(f"get_user_by_id result | user_id={user_id} email={user['email']}")
+        # Fix #95 — email is PII; omit from INFO logs so it doesn't
+        # flow to external log aggregators (Langfuse, CloudWatch, etc.).
+        logger.debug("get_user_by_id result | user_id=%s found=True", user_id)
         return user
 
     except ValueError:

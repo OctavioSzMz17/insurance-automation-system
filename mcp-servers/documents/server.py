@@ -127,7 +127,9 @@ starlette_app = Starlette(
 )
 
 if __name__ == "__main__":
-    host = os.getenv("MCP_HOST", "0.0.0.0")
+    # Fix #92 — default to loopback; operators set MCP_HOST=0.0.0.0 via
+    # ConfigMap/docker-compose when the pod must be reachable by peers.
+    host = os.getenv("MCP_HOST", "127.0.0.1")
     port = int(os.getenv("MCP_PORT", "8005"))
     logger.info(f"Documents MCP server starting | transport=SSE host={host} port={port}")
     uvicorn.run(starlette_app, host=host, port=port)
