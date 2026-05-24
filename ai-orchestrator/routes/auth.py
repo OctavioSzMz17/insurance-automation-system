@@ -136,3 +136,87 @@ async def logout(
         )
 
     return {"status": "logged out"}
+
+
+@router.post(
+    "/revoke-user/{sub}",
+    status_code=status.HTTP_200_OK,
+    summary="(ADMIN) Invalidate all active tokens for a user",
+    description=(
+        "Records a 'revoke-before' timestamp for `sub` in Redis. "
+        "Any token issued to that user before this moment will be "
+        "rejected on the next request, regardless of expiry. "
+        "Requires ADMIN role. Use when a user's role changes or access "
+        "must be terminated immediately (Fix #89)."
+    ),
+    responses={
+        401: {"description": "Missing or invalid token"},
+        403: {"description": "Admin role required"},
+        503: {"description": "Redis unavailable — revocation not persisted"},
+    },
+)
+async def revoke_user_tokens(
+    sub:         str,
+    request:     Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> dict[str, str]:
+    """Invalidate ALL outstanding tokens for the given user subject.
+
+    Fix #89 — closes the role-change gap: a 24h JWT stays valid even after
+    an admin changes the user's role.  This endpoint sets a per-user
+    `revoked_before:{sub}` key in Redis containing the current Unix
+    timestamp.  get_current_user() rejects any token whose `iat` (issued-at)
+    is older than this value.
+    """
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Authorization: Bearer <token> header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Verify caller is an admin.
+    payload = decode_jwt(credentials.credentials)
+    caller_role_str = payload.get("role", "")
+    try:
+        caller_role = Role(caller_role_str)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid role claim in token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if caller_role != Role.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required to revoke user tokens",
+        )
+
+    redis = getattr(request.app.state, "redis", None)
+    if redis is None:
+        logger.error(
+            "revoke-user | Redis unavailable — cannot persist revocation | sub=%s", sub,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Revocation requires Redis. REDIS_URL is not configured.",
+        )
+
+    now_ts = int(time.time())
+    # Keep this key for JWT_EXPIRATION_HOURS + 1 h to auto-expire safely.
+    settings = get_settings()
+    ttl = (settings.jwt_expiration_hours + 1) * 3600
+    try:
+        await redis.set(f"revoked_before:{sub}", str(now_ts), ex=ttl)
+        logger.info(
+            "revoke-user | all tokens revoked | sub=%s revoked_before=%d caller=%s",
+            sub, now_ts, payload.get("sub"),
+        )
+    except Exception as exc:
+        logger.error("revoke-user | Redis error | sub=%s err=%s", sub, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to persist revocation — try again",
+        )
+
+    return {"status": "revoked", "sub": sub, "revoked_before": str(now_ts)}

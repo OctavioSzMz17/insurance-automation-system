@@ -17,8 +17,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import logging
+
 from fastapi import HTTPException, status
 from jose import JWTError, jwt
+
+logger = logging.getLogger(__name__)
 
 # Allow stand-alone imports
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -53,6 +57,15 @@ def create_access_token(
         "iat":  int(now.timestamp()),
         "exp":  int((now + timedelta(hours=ttl)).timestamp()),
     }
+
+    # Fix #93 — include aud/iss claims when they are configured in settings
+    # so tokens issued here pass decode_jwt()'s audience + issuer validation.
+    # In production an IdP issues tokens; this helper is dev/test only.
+    if settings.jwt_audience:
+        payload["aud"] = settings.jwt_audience
+    if settings.jwt_issuer:
+        payload["iss"] = settings.jwt_issuer
+
     return jwt.encode(
         payload,
         settings.jwt_secret_key,
@@ -92,8 +105,13 @@ def decode_jwt(token: str) -> dict[str, Any]:
             options=options,
         )
     except JWTError as e:
+        # Fix #83 — never leak the raw JWTError message to the client.
+        # The detail string reveals *why* verification failed (expired,
+        # bad signature, wrong audience…), giving an attacker enumeration
+        # information.  Log internally at DEBUG; return a generic 401.
+        logger.debug("decode_jwt failed | reason=%s", e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid or expired token: {e}",
+            detail="Invalid or expired token.",
             headers={"WWW-Authenticate": "Bearer"},
         )

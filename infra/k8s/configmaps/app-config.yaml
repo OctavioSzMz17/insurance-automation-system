@@ -28,6 +28,12 @@ data:
   # The signing key is in the Secret, not here.
   JWT_ALGORITHM:        "HS256"
   JWT_EXPIRATION_HOURS: "24"
+  # Fix #93 — activate audience + issuer validation so cross-service token
+  # reuse is rejected by python-jose.  decode_jwt() already reads these via
+  # Settings and passes them to jwt.decode(); they were just never set in
+  # K8s, causing the guard to silently skip.
+  JWT_AUDIENCE:         "insureai-orchestrator"
+  JWT_ISSUER:           "insureai-auth"
 
   # ── LLM provider selection ───────────────────────────────
   # Switching providers = `kubectl edit configmap …` + rollout.

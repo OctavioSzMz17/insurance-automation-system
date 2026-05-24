@@ -53,27 +53,53 @@ async def get_current_user(
 
     payload = decode_jwt(credentials.credentials)
 
+    redis = getattr(request.app.state, "redis", None)
+
     # Fix #69 — JTI revocation check via Redis blocklist.
     jti = payload.get("jti")
-    if jti:
-        redis = getattr(request.app.state, "redis", None)
-        if redis is not None:
-            try:
-                revoked = await redis.get(f"revoked_jti:{jti}")
-                if revoked:
+    if jti and redis is not None:
+        try:
+            revoked = await redis.get(f"revoked_jti:{jti}")
+            if revoked:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token has been revoked",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "JTI revocation check failed (Redis error) — fail-open | jti=%s err=%s",
+                jti, exc,
+            )
+    # Fix #89 — per-user revocation check.
+    # When an admin calls POST /auth/revoke-user/{sub}, a `revoked_before:{sub}`
+    # key is written to Redis.  Any token whose `iat` < that timestamp is
+    # rejected.  Fail-open when Redis is unavailable (same policy as JTI check).
+    token_sub = payload.get("sub", "")
+    token_iat = payload.get("iat", 0)
+    if token_sub and redis is not None:
+        try:
+            revoked_before_raw = await redis.get(f"revoked_before:{token_sub}")
+            if revoked_before_raw is not None:
+                revoked_before_ts = int(revoked_before_raw)
+                if token_iat < revoked_before_ts:
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Token has been revoked",
+                        detail="Token has been revoked due to a role or access change",
                         headers={"WWW-Authenticate": "Bearer"},
                     )
-            except HTTPException:
-                raise
-            except Exception as exc:
-                import logging
-                logging.getLogger(__name__).warning(
-                    "JTI revocation check failed (Redis error) — fail-open | jti=%s err=%s",
-                    jti, exc,
-                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Per-user revocation check failed (Redis error) — fail-open | sub=%s err=%s",
+                token_sub, exc,
+            )
+
     sub      = payload.get("sub")
     role_str = payload.get("role")
     if not sub or not role_str:

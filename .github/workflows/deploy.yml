@@ -1,5 +1,9 @@
 name: Deploy (Blue/Green)
 
+# Fix #96 — all third-party Actions are pinned to immutable commit SHAs
+# (not mutable major-version tags) to eliminate supply-chain risk.
+# Run `gh api repos/<owner>/<action>/git/ref/tags/<version>` to refresh SHAs.
+
 on:
   push:
     branches:
@@ -8,7 +12,7 @@ on:
       - 'v*'
 
 env:
-  REGISTRY: ghcr.io
+  REGISTRY:   ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
@@ -20,13 +24,16 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        # docker/setup-buildx-action v3.10.0
+        uses: docker/setup-buildx-action@b5730a9b27cb8bfe0b8d44ef5cbdb3b0b59fb956
 
       - name: Log in to Container Registry
-        uses: docker/login-action@v2
+        # docker/login-action v3.3.0
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -34,7 +41,8 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v4
+        # docker/metadata-action v5.6.1
+        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -44,7 +52,8 @@ jobs:
             type=sha,prefix={{branch}}-
 
       - name: Build and push Orchestrator
-        uses: docker/build-push-action@v4
+        # docker/build-push-action v6.15.0
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
           context: .
           file: ./infra/docker/Dockerfile.orchestrator
@@ -54,7 +63,7 @@ jobs:
           cache-to: type=inline
 
       - name: Build and push MCP Claims
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
           context: .
           file: ./infra/docker/Dockerfile.mcp-claims
@@ -62,7 +71,7 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/mcp-claims:${{ github.sha }}
 
       - name: Build and push MCP Policies
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
           context: .
           file: ./infra/docker/Dockerfile.mcp-policies
@@ -70,7 +79,7 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/mcp-policies:${{ github.sha }}
 
       - name: Build and push MCP Users
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
           context: .
           file: ./infra/docker/Dockerfile.mcp-users
@@ -78,7 +87,7 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/mcp-users:${{ github.sha }}
 
       - name: Build and push MCP Documents
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25
         with:
           context: .
           file: ./infra/docker/Dockerfile.mcp-documents
@@ -92,7 +101,8 @@ jobs:
     environment: production
 
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Configure kubectl
         run: |
@@ -100,38 +110,86 @@ jobs:
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
           chmod 600 $HOME/.kube/config
 
-      - name: Get current deployment
-        id: current
+      - name: Determine deployment slots
+        id: slots
+        # Fix #98 — detect the CURRENT live slot by reading the service
+        # selector instead of assuming a static deployment exists.
+        # The previous code ran `kubectl get deployment orchestrator-green`
+        # and defaulted to "blue" even if green was the active slot,
+        # causing the rollback to always point at blue regardless of reality.
         run: |
-          CURRENT=$(kubectl -n insurance get deployment orchestrator-green -o name 2>/dev/null || echo "blue")
-          NEW=$([ "$CURRENT" == "blue" ] && echo "green" || echo "blue")
+          CURRENT=$(kubectl -n insureai get service orchestrator \
+            -o jsonpath='{.spec.selector.deployment}' 2>/dev/null \
+            | sed 's/orchestrator-//' || echo "blue")
+          if [ "$CURRENT" = "green" ]; then
+            NEW="blue"
+          else
+            NEW="green"
+          fi
           echo "current=$CURRENT" >> $GITHUB_OUTPUT
           echo "new=$NEW" >> $GITHUB_OUTPUT
+          echo "Deploying to: orchestrator-$NEW  (currently live: orchestrator-$CURRENT)"
 
       - name: Update image in NEW deployment
         run: |
-          kubectl -n insurance set image deployment/orchestrator-${{ steps.current.outputs.new }} \
-            orchestrator=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/orchestrator:${{ github.sha }} \
-            --record
+          kubectl -n insureai set image deployment/orchestrator-${{ steps.slots.outputs.new }} \
+            orchestrator=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/orchestrator:${{ github.sha }}
 
       - name: Wait for rollout
         run: |
-          kubectl -n insurance rollout status deployment/orchestrator-${{ steps.current.outputs.new }} --timeout=5m
+          kubectl -n insureai rollout status \
+            deployment/orchestrator-${{ steps.slots.outputs.new }} --timeout=5m
 
-      - name: Run smoke tests
+      # Fix #97 — real smoke tests instead of a placeholder echo.
+      # Resolved against the new deployment's ClusterIP + internal port so
+      # we don't need to switch the public service before validation.
+      - name: Run smoke tests against NEW deployment
         run: |
-          # Placeholder for smoke tests against the NEW deployment
-          echo "Running smoke tests..."
+          set -euo pipefail
+
+          # Derive the ClusterIP of the NEW (inactive) deployment's headless svc.
+          # Operators must create `orchestrator-green` / `orchestrator-blue`
+          # Services (ClusterIP) that select their respective pods.
+          NEW_SVC_HOST=$(kubectl -n insureai get service \
+            orchestrator-${{ steps.slots.outputs.new }} \
+            -o jsonpath='{.spec.clusterIP}')
+          NEW_SVC_PORT=$(kubectl -n insureai get service \
+            orchestrator-${{ steps.slots.outputs.new }} \
+            -o jsonpath='{.spec.ports[0].port}')
+          BASE="http://${NEW_SVC_HOST}:${NEW_SVC_PORT}"
+
+          echo "▶ Smoke-testing ${BASE}"
+
+          # 1. Liveness — must return 200 {"status":"ok"}
+          HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" "${BASE}/health")
+          [ "$HTTP_CODE" = "200" ] || { echo "❌ /health returned $HTTP_CODE"; exit 1; }
+          echo "✅ /health → $HTTP_CODE"
+
+          # 2. Readiness — must return 200 {"ready":true}
+          READY=$(curl -sf "${BASE}/ready" | grep -o '"ready":[a-z]*' | cut -d: -f2)
+          [ "$READY" = "true" ] || { echo "❌ /ready returned ready=$READY"; exit 1; }
+          echo "✅ /ready → ready=$READY"
+
+          # 3. Auth wall — unauthenticated POST /claims must return 401/403
+          CLAIMS_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+            -X POST "${BASE}/claims/submit" -H "Content-Type: application/json" \
+            -d '{}')
+          case "$CLAIMS_CODE" in
+            401|403|422) echo "✅ /claims/submit auth-wall → $CLAIMS_CODE" ;;
+            *)            echo "❌ /claims/submit auth-wall expected 401/403/422, got $CLAIMS_CODE"; exit 1 ;;
+          esac
+
+          echo "🎉 All smoke tests passed"
 
       - name: Switch traffic to NEW deployment
         run: |
-          kubectl -n insurance patch service orchestrator -p \
-            '{"spec":{"selector":{"deployment":"orchestrator-${{ steps.current.outputs.new }}"}}}'
+          kubectl -n insureai patch service orchestrator -p \
+            "{\"spec\":{\"selector\":{\"deployment\":\"orchestrator-${{ steps.slots.outputs.new }}\"}}}"
 
       - name: Emit deployment event
         run: |
-          # Send deployment metric to observability layer
-          echo "Deployment successful: orchestrator-${{ steps.current.outputs.new }} at $(date)"
+          echo "Deployment successful: orchestrator-${{ steps.slots.outputs.new }} at $(date)"
+          echo "SHA: ${{ github.sha }}"
 
   rollback:
     name: Rollback on Failure
@@ -146,11 +204,26 @@ jobs:
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
           chmod 600 $HOME/.kube/config
 
-      - name: Revert to previous deployment
+      - name: Determine previous (safe) deployment slot
+        id: prev
+        # Fix #98 — read the CURRENT live slot from the service selector and
+        # roll back to IT (the one already serving traffic), not to a hardcoded
+        # "blue".  At rollback time the service may or may not have been flipped
+        # yet, so we read the selector and keep whichever slot is live.
         run: |
-          kubectl -n insurance patch service orchestrator -p \
-            '{"spec":{"selector":{"deployment":"orchestrator-blue"}}}'
+          LIVE=$(kubectl -n insureai get service orchestrator \
+            -o jsonpath='{.spec.selector.deployment}' 2>/dev/null \
+            | sed 's/orchestrator-//' || echo "blue")
+          echo "live=$LIVE" >> $GITHUB_OUTPUT
+          echo "Rolling back — ensuring traffic points at: orchestrator-$LIVE"
+
+      - name: Revert service selector to the safe slot
+        run: |
+          kubectl -n insureai patch service orchestrator -p \
+            "{\"spec\":{\"selector\":{\"deployment\":\"orchestrator-${{ steps.prev.outputs.live }}\"}}}"
 
       - name: Alert on rollback
         run: |
-          echo "⚠️  Rollback executed. Check logs for failure details."
+          echo "⚠️  Rollback executed — traffic restored to orchestrator-${{ steps.prev.outputs.live }}"
+          echo "SHA attempted: ${{ github.sha }}"
+          echo "Check deployment logs for failure details."

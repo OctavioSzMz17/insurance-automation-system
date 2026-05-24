@@ -18,6 +18,7 @@ Everything else (logs, MCP calls, Langfuse sessions) just reads it.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -38,6 +39,11 @@ logger = logging.getLogger(__name__)
 
 TRACE_HEADER = "X-Trace-Id"
 
+# Fix #86 — only allow characters that cannot create log-injection payloads.
+# UUID-format IDs (hex + hyphens) pass; anything with CR, LF, or other
+# control characters is rejected and replaced with a fresh server-generated id.
+_SAFE_TRACE_RE = re.compile(r"^[A-Za-z0-9\-_]{1,128}$")
+
 
 class TraceIdMiddleware(BaseHTTPMiddleware):
     """Binds X-Trace-Id (or a fresh UUID) to the request's context."""
@@ -48,7 +54,21 @@ class TraceIdMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         incoming = request.headers.get(self._header)
-        trace_id = incoming or new_trace_id()
+
+        # Fix #86 — sanitize the client-supplied trace id before using it
+        # in any log statement.  A value that contains newlines / ANSI
+        # escape sequences can inject fake log lines (log injection).
+        # Accept only UUID-safe characters; fall back to a fresh id otherwise.
+        if incoming and _SAFE_TRACE_RE.match(incoming):
+            trace_id = incoming
+        else:
+            if incoming:
+                logger.debug(
+                    "X-Trace-Id header rejected (unsafe chars) | "
+                    "len=%d; generating new id", len(incoming),
+                )
+            trace_id = new_trace_id()
+
         set_trace_id(trace_id)
 
         try:

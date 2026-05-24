@@ -101,6 +101,11 @@ async def ready(request: Request, response: Response) -> ReadinessResponse:
     is_ready = all(checks.values())
     if not is_ready:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        logger.warning("Readiness check FAILED | checks=%s", checks)
+        logger.warning("Readiness check FAILED | checks=%s details=%s", checks, details)
 
-    return ReadinessResponse(ready=is_ready, checks=checks, details=details)
+    # Fix #94 — /ready is publicly reachable (K8s probes carry no auth header).
+    # Returning internal `details` (e.g. "Redis PING failed: <host>:<port>",
+    # "LLM_PROVIDER_API_KEY is empty") leaks infrastructure topology to any
+    # unauthenticated caller.  All detail is already logged; the response body
+    # only exposes boolean check flags so the probe status is still actionable.
+    return ReadinessResponse(ready=is_ready, checks=checks, details={})

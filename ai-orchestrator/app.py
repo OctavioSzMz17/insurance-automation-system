@@ -202,6 +202,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 # ── App ───────────────────────────────────────────────────────────
 
+# Fix #82 — disable the auto-generated /docs and /openapi.json endpoints in
+# production / staging so internal API structure is not publicly discoverable.
+# In development the docs remain available (fast feedback loop).
+_PROD_ENVS_DOCS = {"production", "prod", "staging"}
+_docs_url    = None if _settings.environment.lower() in _PROD_ENVS_DOCS else "/docs"
+_redoc_url   = None if _settings.environment.lower() in _PROD_ENVS_DOCS else "/redoc"
+_openapi_url = None if _settings.environment.lower() in _PROD_ENVS_DOCS else "/openapi.json"
+
 app = FastAPI(
     title="InsureAI Orchestrator",
     description=(
@@ -210,6 +218,9 @@ app = FastAPI(
     ),
     version="0.1.0",
     lifespan=lifespan,
+    docs_url=_docs_url,
+    redoc_url=_redoc_url,
+    openapi_url=_openapi_url,
 )
 
 # D2.4 — bind a trace_id to every request as the first thing we do.
@@ -221,10 +232,14 @@ app.add_middleware(TraceIdMiddleware)
 # Wildcard "*" is never used; falls back to localhost only when the var
 # is unset (safe for local dev, refuses cross-origin in production).
 _cors_settings = get_settings()
+# Fix #88 — restrict allow_methods to the HTTP verbs actually used by the
+# API (GET and POST only). PUT/PATCH/DELETE were present but no endpoint
+# implements them; advertising them in CORS widens the attack surface and
+# confuses browser security policies.  OPTIONS is required for preflight.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_settings.cors_origins_list,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Trace-Id"],
     expose_headers=["X-Trace-Id"],
 )

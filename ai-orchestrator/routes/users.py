@@ -105,6 +105,22 @@ async def get_user(
             detail="Internal error retrieving user",
         )
 
+    # Fix #81 — tenant isolation for ANALYST role.
+    # ANALYST == policyholder: JWT sub equals their email. They may only look
+    # up their own user record.  AUDITOR and ADMIN bypass this check.
+    if user.role == Role.ANALYST:
+        owner_email = (row.get("email") or "").strip().lower()
+        actor_sub   = user.sub.strip().lower()
+        if not owner_email or owner_email != actor_sub:
+            logger.warning(
+                "GET /users/%s DENIED cross-user | actor=%s owner_email=%r",
+                user_id, user.sub, owner_email,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not authorised to view this user record",
+            )
+
     return UserResponse(**row)
 
 
@@ -135,6 +151,40 @@ async def get_user_policies(
     logger.info(
         f"GET /users/{user_id}/policies | actor={user.sub} role={user.role.value}"
     )
+
+    # Fix #81 — tenant isolation for ANALYST role.
+    # Resolve the user's email via legacy-provider and enforce that ANALYST
+    # (= policyholder) can only access their own policies.
+    # AUDITOR and ADMIN bypass this check.
+    if user.role == Role.ANALYST:
+        try:
+            user_row = await mcp_router.call(
+                "legacy-provider", "get_user_by_id",
+                caller_role=user.role,
+                user_id=user_id,
+            )
+            owner_email = (user_row.get("email") or "").strip().lower()
+            actor_sub   = user.sub.strip().lower()
+            if not owner_email or owner_email != actor_sub:
+                logger.warning(
+                    "GET /users/%s/policies DENIED cross-user | actor=%s owner_email=%r",
+                    user_id, user.sub, owner_email,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You are not authorised to view this user's policies",
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(
+                "GET /users/%s/policies ownership check failed | actor=%s err=%s",
+                user_id, user.sub, exc,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Could not verify ownership",
+            )
 
     try:
         rows = await mcp_router.call(
