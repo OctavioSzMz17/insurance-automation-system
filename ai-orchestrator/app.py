@@ -107,6 +107,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "replace before deploying to any shared environment"
         )
 
+    # Fix #73 — refuse to start in production/staging with /tmp upload dir.
+    # Files in /tmp are cleared on pod restart; a PVC mount is required.
+    _upload_dir = settings.claim_upload_dir or "/tmp/claim-uploads"
+    if settings.environment.lower() in _PROD_ENVS:
+        if not settings.claim_upload_dir or "/tmp" in _upload_dir:
+            raise RuntimeError(
+                f"CLAIM_UPLOAD_DIR is '{_upload_dir}' — /tmp is not persistent "
+                f"across pod restarts. Mount a PVC and set CLAIM_UPLOAD_DIR in .env."
+            )
+    elif not settings.claim_upload_dir or "/tmp" in _upload_dir:
+        logger.warning(
+            "CLAIM_UPLOAD_DIR uses /tmp ('%s') — files will be lost on restart. "
+            "Set CLAIM_UPLOAD_DIR to a persistent path for production use.",
+            _upload_dir,
+        )
+
     # Fix A — initialise Redis client (None when REDIS_URL is not set).
     redis_client = await create_redis_client(settings.redis_url)
     app.state.redis = redis_client

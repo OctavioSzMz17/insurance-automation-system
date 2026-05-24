@@ -74,6 +74,16 @@ class Settings(BaseSettings):
     # closing the audit-trail spoofing vector. >=32 chars required.
     proposal_signing_key: str = Field(default="", alias="PROPOSAL_SIGNING_KEY")
 
+    # ── File storage (Fix #73) ────────────────────────────────────
+    # Persistent directory for uploaded PDFs. Must be a volume mount in
+    # production — /tmp is cleared on pod restart. App raises RuntimeError
+    # at startup if this is /tmp (or empty) in production/staging.
+    # Set via CLAIM_UPLOAD_DIR in .env.
+    claim_upload_dir: str = Field(
+        default="/tmp/claim-uploads",
+        alias="CLAIM_UPLOAD_DIR",
+    )
+
     # ── Agent / pipeline ──────────────────────────────────────────
     max_retry_attempts: int = Field(default=3, alias="MAX_RETRY_ATTEMPTS")
 

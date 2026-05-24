@@ -277,8 +277,10 @@ async def submit_claim(
 # ── POST /claims/submit-upload (multipart) ───────────────────────
 
 # Shared volume for uploaded PDFs (inside the orchestrator container).
-# In production this is a PVC mounted by both orchestrator + documents MCP.
-_UPLOAD_DIR = Path(os.getenv("CLAIM_UPLOAD_DIR", "/tmp/claim-uploads"))
+# Fix #73 — reads from Settings (CLAIM_UPLOAD_DIR in .env) so the path
+# is validated at startup via the lifespan guard in app.py.
+# In production this must be a PVC mounted by both orchestrator + docs MCP.
+_UPLOAD_DIR = Path(get_settings().claim_upload_dir or "/tmp/claim-uploads")
 _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 _MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB cap (matches PDF MCP limit)
 

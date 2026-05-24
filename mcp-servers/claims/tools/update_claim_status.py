@@ -49,8 +49,10 @@ write_restricted = _mod.write_restricted
 
 logger = logging.getLogger(__name__)
 
-# Statuses we accept as the NEW status
-_TERMINAL_STATUSES = {"APPROVED", "REJECTED"}
+# Statuses we accept as the NEW status.
+# Fix #74 — MANUAL_REVIEW added: POST /confirm with decision=MANUAL_REVIEW
+# was always returning 404 because ValueError was mapped to 404 in the route.
+_TERMINAL_STATUSES = {"APPROVED", "REJECTED", "MANUAL_REVIEW"}
 # Statuses a claim must be in to be moved
 _MUTABLE_FROM      = {"AWAITING_INPUT", "MANUAL_REVIEW"}
 
