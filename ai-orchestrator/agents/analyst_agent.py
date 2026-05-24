@@ -87,7 +87,15 @@ class AnalystAgent:
         if "pdf_path" not in claim_input:
             raise ValueError("AnalystAgent.run requires 'pdf_path' in claim_input")
 
-        logger.info(f"AnalystAgent.run | claim_input={claim_input}")
+        # Fix B — log only non-sensitive keys at INFO. The full dict can
+        # contain `callbacks` with observability tokens (Langfuse API key)
+        # that must not reach external log aggregators.
+        logger.info(
+            "AnalystAgent.run | pdf_path=%s has_callbacks=%s is_retry=%s",
+            claim_input.get("pdf_path"),
+            bool(claim_input.get("callbacks")),
+            bool(claim_input.get("previous_attempt_error")),
+        )
         state = AgentState(claim_input=claim_input)
         state.iteration = 1
         state.log_step("start", input=claim_input)

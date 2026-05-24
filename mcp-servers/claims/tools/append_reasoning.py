@@ -19,6 +19,7 @@ Rules applied:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -87,7 +88,9 @@ async def append_reasoning(claim_id: int, text_to_append: str) -> dict[str, Any]
         f"append_reasoning called | claim_id={claim_id} bytes={len(text_to_append)}"
     )
 
-    try:
+    # Fix A — run the entire transaction in a thread pool to avoid blocking
+    # the event loop. ValueError raised inside propagates through to_thread.
+    def _execute_append() -> Any:
         engine = get_engine()
         with engine.begin() as conn:
             # Confirm the claim exists first — surface a clean 404 rather
@@ -112,7 +115,7 @@ async def append_reasoning(claim_id: int, text_to_append: str) -> dict[str, Any]
                 {"id": claim_id, "new_text": text_to_append},
             )
 
-            row = conn.execute(
+            return conn.execute(
                 text("""
                     SELECT claim_id, user_id, policy_id, incident_date,
                            incident_description, incident_location,
@@ -127,6 +130,8 @@ async def append_reasoning(claim_id: int, text_to_append: str) -> dict[str, Any]
                 {"id": claim_id},
             ).fetchone()
 
+    try:
+        row = await asyncio.to_thread(_execute_append)
     except ValueError:
         raise
     except Exception as e:

@@ -24,6 +24,7 @@ Rules applied:
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util as _ilu
 import logging
 import sys
@@ -92,17 +93,21 @@ async def update_claim_status(
             f"new_status must be one of {sorted(_TERMINAL_STATUSES)}, got {new_status!r}"
         )
 
-    logger.info(
-        f"update_claim_status called | claim_id={claim_id} "
-        f"new_status={new_status} actor={actor}"
-    )
+    # Fix C — actor is the JWT sub (email); keep it out of INFO so it
+    # doesn't flow to external log aggregators (same pattern as #95).
+    logger.info("update_claim_status called | claim_id=%s new_status=%s", claim_id, new_status)
+    logger.debug("update_claim_status actor | claim_id=%s actor=%s", claim_id, actor)
 
     audit_line = (
         f"\n\n[MANUAL OVERRIDE — {datetime.now(timezone.utc).isoformat()} "
         f"by {actor}] Status set to {new_status}. Reason: {note}"
     )
 
-    try:
+    # Fix A — run the entire transaction (SELECT FOR UPDATE + UPDATE) in a
+    # single thread-pool task so the asyncio event loop is not blocked.
+    # ValueError and ClaimStateConflictError raised inside the helper
+    # propagate through asyncio.to_thread unchanged.
+    def _execute_transition() -> Any:
         engine = get_engine()
         with engine.begin() as conn:
             # 1. Lock the row + read current status atomically
@@ -126,7 +131,6 @@ async def update_claim_status(
                 )
 
             # Fix #87 — block no-op transitions (e.g. MANUAL_REVIEW → MANUAL_REVIEW).
-            # These produce spurious audit-trail entries without changing any real state.
             if new_status == str(current.claim_status):
                 raise ValueError(
                     f"Claim {claim_id} is already in status {new_status!r} — "
@@ -134,7 +138,7 @@ async def update_claim_status(
                 )
 
             # 2. Apply the transition + append to ai_reasoning
-            result = conn.execute(
+            return conn.execute(
                 text("""
                     UPDATE claims
                     SET    claim_status = CAST(:new_status AS claim_status),
@@ -153,9 +157,10 @@ async def update_claim_status(
                     "new_status": new_status,
                     "audit_line": audit_line,
                 },
-            )
-            row = result.fetchone()
+            ).fetchone()
 
+    try:
+        row = await asyncio.to_thread(_execute_transition)
     except (ValueError, ClaimStateConflictError):
         raise
     except Exception as e:

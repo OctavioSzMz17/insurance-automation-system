@@ -28,6 +28,7 @@ Rules applied:
     Rule 11 — Full type hints
 """
 
+import asyncio
 import logging
 import sys
 from datetime import date
@@ -83,11 +84,11 @@ async def get_policies_by_user_id(user_id: int) -> list[dict[str, Any]]:
     """
     logger.info(f"get_policies_by_user_id called | user_id={user_id}")
 
-    try:
+    # Fix A — run sync SQLAlchemy in a thread pool to avoid blocking the event loop.
+    def _fetch() -> list:
         engine = get_engine()
-
         with engine.connect() as conn:
-            result = conn.execute(
+            return conn.execute(
                 text("""
                     SELECT policy_id, user_id, type, status,
                            deductible_usd, coverage_limit_usd,
@@ -97,16 +98,14 @@ async def get_policies_by_user_id(user_id: int) -> list[dict[str, Any]]:
                     ORDER  BY policy_id
                 """),
                 {"user_id": user_id},
-            )
-            rows = result.fetchall()
+            ).fetchall()
 
-        policies = [_serialize_row(row) for row in rows]
-        logger.info(
-            f"get_policies_by_user_id result | user_id={user_id} "
-            f"count={len(policies)}"
-        )
-        return policies
-
+    try:
+        rows = await asyncio.to_thread(_fetch)
     except Exception as e:
         logger.error(f"get_policies_by_user_id failed | user_id={user_id} error={e}")
         raise RuntimeError(f"Database query failed for user_id={user_id}: {e}") from e
+
+    policies = [_serialize_row(row) for row in rows]
+    logger.info(f"get_policies_by_user_id result | user_id={user_id} count={len(policies)}")
+    return policies

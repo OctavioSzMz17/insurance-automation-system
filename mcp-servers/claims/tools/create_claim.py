@@ -17,6 +17,7 @@ Rules applied:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from datetime import date as date_type
@@ -89,10 +90,24 @@ async def create_claim(claim_data: dict[str, Any]) -> dict[str, Any]:
     ai_reasoning_to_persist = validated.ai_reasoning
 
     # Layer 2: write (DB constraints + triggers enforce final guarantees)
-    try:
+    # Fix A — run sync SQLAlchemy in a thread pool to avoid blocking the
+    # event loop during the INSERT round-trip.
+    params = {
+        "user_id":                validated.user_id,
+        "policy_id":              validated.policy_id,
+        "incident_date":          validated.incident_date,
+        "incident_description":   validated.incident_description,
+        "incident_location":      validated.incident_location,
+        "severity_label":         validated.severity_label.value,
+        "reported_damage_amount": validated.reported_damage_amount,
+        "claim_status":           validated.claim_status.value,
+        "ai_reasoning":           ai_reasoning_to_persist,
+    }
+
+    def _insert() -> Any:
         engine = get_engine()
         with engine.begin() as conn:
-            result = conn.execute(
+            return conn.execute(
                 text("""
                     INSERT INTO claims (
                         user_id, policy_id, incident_date,
@@ -112,20 +127,11 @@ async def create_claim(claim_data: dict[str, Any]) -> dict[str, Any]:
                               claim_status::text, ai_reasoning,
                               created_at, updated_at
                 """),
-                {
-                    "user_id":                validated.user_id,
-                    "policy_id":              validated.policy_id,
-                    "incident_date":          validated.incident_date,
-                    "incident_description":   validated.incident_description,
-                    "incident_location":      validated.incident_location,
-                    "severity_label":         validated.severity_label.value,
-                    "reported_damage_amount": validated.reported_damage_amount,
-                    "claim_status":           validated.claim_status.value,
-                    "ai_reasoning":           ai_reasoning_to_persist,
-                },
-            )
-            row = result.fetchone()
+                params,
+            ).fetchone()
 
+    try:
+        row = await asyncio.to_thread(_insert)
     except Exception as e:
         logger.error(f"create_claim DB write failed | error={e}")
         raise RuntimeError(f"Failed to persist claim: {e}") from e

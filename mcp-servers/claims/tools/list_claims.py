@@ -15,6 +15,7 @@ Rules applied:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from datetime import date as date_type
@@ -118,11 +119,16 @@ async def list_claims(
         LIMIT :limit OFFSET :offset
     """
 
-    try:
+    # Fix A — run sync SQLAlchemy in a thread pool to avoid blocking the
+    # event loop. sql and params are captured by the closure; both are
+    # immutable at this point so thread safety is not a concern.
+    def _fetch() -> list:
         engine = get_engine()
         with engine.connect() as conn:
-            result = conn.execute(text(sql), params)
-            rows = result.fetchall()
+            return conn.execute(text(sql), params).fetchall()
+
+    try:
+        rows = await asyncio.to_thread(_fetch)
     except Exception as e:
         logger.error(f"list_claims failed | error={e}")
         raise RuntimeError(f"Database query failed: {e}") from e
