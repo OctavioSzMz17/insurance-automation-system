@@ -1,79 +1,45 @@
-"""Policy schema for the Insurance Automation System.
-
-Rule 1: Shared schemas live exclusively in packages/common/.
-Rule 11: All fields strictly typed via Pydantic.
-Rule 2: Monetary fields use Decimal (never float) to avoid rounding errors.
-"""
+"""Policy and coverage-rule schemas. Monetary fields are Decimal (Rule 2)."""
+from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
-from pydantic import BaseModel, field_validator, model_validator
+from uuid import UUID
 
-from packages.common.enums import PolicyStatus
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from ..enums import PolicyStatus
+from ..money import to_money
 
 
-class PolicySchema(BaseModel):
-    """Represents an insurance contract."""
+class CoverageRule(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    policy_id: str
-    user_id: int
-    type: str
+    code: str = Field(min_length=1, max_length=64)
+    description: str = Field(min_length=1, max_length=500)
+    included: bool
+    sub_limit_usd: Decimal | None = None
+
+    @field_validator("sub_limit_usd", mode="before")
+    @classmethod
+    def _coerce_limit(cls, v: object) -> object:
+        return to_money(v) if v is not None else None  # type: ignore[arg-type]
+
+
+class Policy(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    id: UUID
+    user_id: UUID
     status: PolicyStatus
     deductible_usd: Decimal
     coverage_limit_usd: Decimal
-    start_date: date
-    end_date: date
+    effective_from: date
+    effective_to: date
+    coverage_rules: tuple[CoverageRule, ...] = ()
+    created_at: datetime
+    updated_at: datetime
 
-    # Audit timestamps (optional: not always present in Excel source)
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-
-    @field_validator("type")
+    @field_validator("deductible_usd", "coverage_limit_usd", mode="before")
     @classmethod
-    def type_must_not_be_empty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("type must not be empty")
-        return v.strip()
-
-    @field_validator("deductible_usd")
-    @classmethod
-    def deductible_must_be_non_negative(cls, v: Decimal) -> Decimal:
-        if v < 0:
-            raise ValueError("deductible_usd must be >= 0")
-        return v
-
-    @field_validator("coverage_limit_usd")
-    @classmethod
-    def coverage_limit_must_be_positive(cls, v: Decimal) -> Decimal:
-        if v <= 0:
-            raise ValueError("coverage_limit_usd must be > 0")
-        return v
-
-    @model_validator(mode="after")
-    def business_rules(self) -> "PolicySchema":
-        # Business rule: deductible < coverage limit
-        if self.deductible_usd >= self.coverage_limit_usd:
-            raise ValueError(
-                f"deductible_usd ({self.deductible_usd}) must be less than "
-                f"coverage_limit_usd ({self.coverage_limit_usd})"
-            )
-        # Business rule: end_date > start_date
-        if self.end_date <= self.start_date:
-            raise ValueError(
-                f"end_date ({self.end_date}) must be after start_date ({self.start_date})"
-            )
-        return self
-
-
-class PolicyCreateSchema(BaseModel):
-    """Schema for inserting a new policy into the database."""
-
-    policy_id: str
-    user_id: int
-    type: str
-    status: PolicyStatus
-    deductible_usd: Decimal
-    coverage_limit_usd: Decimal
-    start_date: date
-    end_date: date
+    def _coerce_money(cls, v: object) -> Decimal:
+        return to_money(v)  # type: ignore[arg-type]

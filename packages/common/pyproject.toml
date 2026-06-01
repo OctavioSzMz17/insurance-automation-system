@@ -1,15 +1,23 @@
 [build-system]
-requires = ["setuptools>=42"]
+requires = ["setuptools==75.1.0", "wheel==0.44.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "insurance-common"
 version = "0.1.0"
-description = "Shared schemas, enums and exceptions for Insurance Automation System"
+description = "Shared schemas, enums, exceptions for the insurance automation monorepo."
 requires-python = ">=3.11"
 dependencies = [
-    "pydantic>=2.0.0",
+    "pydantic==2.11.7",
+    "email-validator==2.2.0",
 ]
 
-[tool.setuptools.packages.find]
-where = ["."]
+[tool.setuptools]
+packages = [
+    "packages.common",
+    "packages.common.schemas",
+]
+
+[tool.setuptools.package-dir]
+"packages.common" = "."
+"packages.common.schemas" = "schemas"

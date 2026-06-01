@@ -1,0 +1,1103 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LIA — Monitoreo en Vivo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:           #F7F8FA;
+  --surface:      #FFFFFF;
+  --border:       #E4E7EC;
+  --border-soft:  #F0F2F5;
+  --text-1:       #111827;
+  --text-2:       #6B7280;
+  --text-3:       #9CA3AF;
+  --accent:       #5B5BD6;
+  --accent-dim:   #EDEDFB;
+  --accent-dark:  #4747C2;
+  --success:      #059669;
+  --success-dim:  #D1FAE5;
+  --warning:      #D97706;
+  --warning-dim:  #FEF3C7;
+  --error:        #DC2626;
+  --error-dim:    #FEE2E2;
+  --info:         #0284C7;
+  --info-dim:     #E0F2FE;
+  --shadow-sm:    0 0 0 1px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.05);
+  --shadow-md:    0 0 0 1px rgba(0,0,0,0.06), 0 4px 20px rgba(0,0,0,0.08);
+  --shadow-lg:    0 0 0 1px rgba(0,0,0,0.06), 0 8px 40px rgba(0,0,0,0.12);
+  --radius:       12px;
+  --radius-sm:    8px;
+  --radius-xs:    6px;
+}
+
+html { font-size: 15px; }
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text-1);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* ── NAV ─────────────────────────────────────────────────────────────── */
+nav {
+  position: sticky; top: 0; z-index: 200;
+  height: 56px;
+  background: rgba(255,255,255,0.88);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center;
+  padding: 0 28px; gap: 0;
+}
+.nav-brand {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 15px; font-weight: 600; color: var(--text-1);
+  letter-spacing: -0.3px; text-decoration: none;
+}
+.nav-logo {
+  width: 28px; height: 28px; background: var(--accent);
+  border-radius: 7px; display: grid; place-items: center;
+}
+.nav-logo svg { width: 16px; height: 16px; color: #fff; }
+.nav-links { display: flex; align-items: center; gap: 2px; margin-left: 32px; }
+.nav-link {
+  padding: 5px 10px; font-size: 13.5px; font-weight: 400; color: var(--text-2);
+  text-decoration: none; border-radius: var(--radius-xs);
+  transition: color 0.15s, background 0.15s;
+}
+.nav-link:hover { color: var(--text-1); background: var(--border-soft); }
+.nav-link.active { color: var(--text-1); font-weight: 500; background: var(--border-soft); }
+.nav-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.nav-bell {
+  position: relative; width: 34px; height: 34px;
+  border: none; background: none; cursor: pointer;
+  border-radius: var(--radius-sm); display: grid; place-items: center;
+  color: var(--text-2); transition: background 0.15s, color 0.15s;
+}
+.nav-bell:hover { background: var(--border-soft); color: var(--text-1); }
+.nav-bell svg { width: 17px; height: 17px; }
+.nav-badge {
+  position: absolute; top: 5px; right: 5px; width: 8px; height: 8px;
+  background: var(--error); border-radius: 50%; border: 2px solid #fff;
+}
+.nav-avatar {
+  width: 32px; height: 32px; background: var(--accent-dim); border-radius: 50%;
+  display: grid; place-items: center; font-size: 12px; font-weight: 600;
+  color: var(--accent); cursor: pointer; border: none;
+}
+
+/* ── MAIN ────────────────────────────────────────────────────────────── */
+main {
+  max-width: 1200px; margin: 0 auto;
+  padding: 36px 28px 80px;
+  transition: padding-right 0.35s;
+}
+main.drawer-open { padding-right: 500px; }
+
+.page-header {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  margin-bottom: 28px;
+}
+.page-eyebrow {
+  font-size: 12px; font-weight: 500; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-3); margin-bottom: 5px;
+}
+.page-title {
+  font-size: 22px; font-weight: 600; color: var(--text-1); letter-spacing: -0.5px;
+  display: flex; align-items: center; gap: 10px;
+}
+.live-indicator {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; background: var(--success-dim);
+  border-radius: 99px; font-size: 11.5px; font-weight: 600;
+  color: var(--success); letter-spacing: 0;
+}
+.live-dot { width: 6px; height: 6px; background: var(--success); border-radius: 50%; animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100%{opacity:.4} 50%{opacity:1} }
+
+.btn-new-claim {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 8px 18px; background: var(--accent); border: none;
+  border-radius: var(--radius-sm); font-size: 13.5px; font-weight: 600;
+  color: #fff; cursor: pointer; font-family: inherit;
+  box-shadow: 0 1px 3px rgba(91,91,214,0.3);
+  transition: background 0.15s, transform 0.1s;
+  text-decoration: none;
+}
+.btn-new-claim:hover { background: var(--accent-dark); transform: translateY(-1px); }
+.btn-new-claim svg { width: 14px; height: 14px; }
+
+/* ── METRIC CARDS ────────────────────────────────────────────────────── */
+.metrics-row {
+  display: grid; grid-template-columns: repeat(5, 1fr);
+  gap: 12px; margin-bottom: 24px;
+}
+.metric-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 18px 20px;
+  box-shadow: var(--shadow-sm); cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.1s;
+}
+.metric-card:hover { border-color: #C9CDD6; transform: translateY(-1px); box-shadow: var(--shadow-md); }
+.metric-card.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim), var(--shadow-sm); }
+.metric-label { font-size: 11.5px; font-weight: 500; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+.metric-value { font-size: 28px; font-weight: 700; color: var(--text-1); letter-spacing: -1px; line-height: 1; margin-bottom: 4px; }
+.metric-value.processing { color: var(--accent); }
+.metric-value.awaiting  { color: var(--warning); }
+.metric-value.error     { color: var(--error); }
+.metric-value.confirmed { color: var(--success); }
+.metric-sub { font-size: 11.5px; color: var(--text-3); }
+
+/* ── FILTER BAR ──────────────────────────────────────────────────────── */
+.filter-bar {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 14px; flex-wrap: wrap;
+}
+.search-wrap {
+  position: relative; flex: 1; min-width: 220px; max-width: 320px;
+}
+.search-wrap svg {
+  position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
+  width: 15px; height: 15px; color: var(--text-3); pointer-events: none;
+}
+.input-search {
+  width: 100%; padding: 8px 12px 8px 34px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-size: 13.5px; color: var(--text-1); background: var(--surface);
+  font-family: inherit; outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.input-search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.input-search::placeholder { color: var(--text-3); }
+
+.select-filter {
+  padding: 8px 32px 8px 12px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); font-size: 13.5px; color: var(--text-1);
+  background: var(--surface); font-family: inherit; outline: none; cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239CA3AF' stroke-width='2.5'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center;
+  transition: border-color 0.15s;
+}
+.select-filter:focus { border-color: var(--accent); }
+
+.btn-filter-clear {
+  padding: 8px 14px; background: none; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); font-size: 13px; font-weight: 500;
+  color: var(--text-2); cursor: pointer; font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+}
+.btn-filter-clear:hover { background: var(--bg); color: var(--text-1); }
+
+.filter-count {
+  font-size: 12.5px; color: var(--text-2); margin-left: auto;
+}
+.filter-count span { font-weight: 600; color: var(--text-1); }
+
+/* ── TABLE ───────────────────────────────────────────────────────────── */
+.table-wrap {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+table {
+  width: 100%; border-collapse: collapse; table-layout: auto;
+}
+thead th {
+  padding: 11px 16px; text-align: left;
+  font-size: 11.5px; font-weight: 600; color: var(--text-2);
+  text-transform: uppercase; letter-spacing: 0.05em;
+  background: var(--bg); border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+thead th:first-child { padding-left: 20px; }
+thead th:last-child  { padding-right: 20px; text-align: right; }
+
+tbody tr {
+  border-bottom: 1px solid var(--border-soft);
+  transition: background 0.12s;
+  cursor: pointer;
+}
+tbody tr:last-child { border-bottom: none; }
+tbody tr:hover { background: #FAFBFC; }
+tbody tr.selected { background: var(--accent-dim); }
+tbody tr.flash { animation: rowFlash 1.2s ease; }
+@keyframes rowFlash {
+  0%   { background: var(--warning-dim); }
+  100% { background: transparent; }
+}
+
+tbody td {
+  padding: 13px 16px; font-size: 13.5px; vertical-align: middle;
+}
+tbody td:first-child { padding-left: 20px; }
+tbody td:last-child  { padding-right: 20px; text-align: right; }
+
+.td-claim-id {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12.5px; font-weight: 600; color: var(--accent);
+}
+.td-holder { font-weight: 500; }
+.td-type   { color: var(--text-2); font-size: 13px; }
+.td-agent  { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--text-3); }
+.td-ts     { font-size: 12px; color: var(--text-3); white-space: nowrap; }
+.td-payout { font-weight: 600; font-size: 13px; }
+.td-payout.empty { color: var(--text-3); font-weight: 400; }
+
+/* status badges */
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 9px; border-radius: 99px;
+  font-size: 11.5px; font-weight: 600; white-space: nowrap;
+}
+.badge-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.b-processing    { background: var(--accent-dim);   color: var(--accent); }
+.b-processing .badge-dot { animation: pulse 1.2s infinite; }
+.b-awaiting      { background: var(--warning-dim);  color: var(--warning); }
+.b-awaiting .badge-dot { animation: pulse 1.2s infinite; }
+.b-confirmed     { background: var(--success-dim);  color: var(--success); }
+.b-error         { background: var(--error-dim);    color: var(--error); }
+.b-manual        { background: #FFF7ED;              color: #C2410C; }
+
+.b-sev-low    { background: var(--success-dim); color: var(--success); }
+.b-sev-medium { background: var(--warning-dim); color: var(--warning); }
+.b-sev-high   { background: var(--error-dim);   color: var(--error); }
+
+.btn-view {
+  padding: 5px 12px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius-xs);
+  font-size: 12.5px; font-weight: 500; color: var(--text-1);
+  cursor: pointer; font-family: inherit;
+  transition: background 0.12s, border-color 0.12s;
+  white-space: nowrap;
+}
+.btn-view:hover { background: var(--bg); border-color: #C9CDD6; }
+
+/* ── DRAWER ──────────────────────────────────────────────────────────── */
+.drawer-overlay {
+  position: fixed; inset: 0; background: rgba(17,24,39,0.18);
+  z-index: 150; opacity: 0; pointer-events: none;
+  transition: opacity 0.3s;
+}
+.drawer-overlay.open { opacity: 1; pointer-events: all; }
+
+.drawer {
+  position: fixed; top: 56px; right: 0; bottom: 0; width: 480px;
+  background: var(--surface); border-left: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  display: flex; flex-direction: column;
+  z-index: 160;
+  transform: translateX(100%);
+  transition: transform 0.35s cubic-bezier(0.32,0.72,0,1);
+}
+.drawer.open { transform: translateX(0); }
+
+.drawer-header {
+  padding: 16px 20px 0; border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.drawer-toprow {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 12px;
+}
+.drawer-claim-id {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px; font-weight: 600; color: var(--accent);
+}
+.drawer-holder { font-size: 16px; font-weight: 600; color: var(--text-1); letter-spacing: -0.3px; }
+.drawer-meta   { font-size: 13px; color: var(--text-2); margin-top: 2px; margin-bottom: 14px; display: flex; align-items: center; gap: 10px; }
+.meta-sep { color: var(--border); }
+
+.btn-drawer-close {
+  width: 32px; height: 32px; border: none; background: none;
+  border-radius: var(--radius-xs); cursor: pointer;
+  display: grid; place-items: center; color: var(--text-2);
+  transition: background 0.15s, color 0.15s;
+}
+.btn-drawer-close:hover { background: var(--bg); color: var(--text-1); }
+.btn-drawer-close svg { width: 16px; height: 16px; }
+
+/* drawer tabs */
+.drawer-tabs {
+  display: flex; gap: 0;
+}
+.drawer-tab {
+  padding: 9px 16px; font-size: 13px; font-weight: 500;
+  color: var(--text-2); cursor: pointer; border: none; background: none;
+  font-family: inherit; border-bottom: 2px solid transparent;
+  transition: color 0.15s; white-space: nowrap;
+  display: flex; align-items: center; gap: 6px;
+}
+.drawer-tab:hover { color: var(--text-1); }
+.drawer-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-badge {
+  width: 6px; height: 6px; background: var(--success); border-radius: 50%;
+}
+
+.drawer-body {
+  flex: 1; overflow-y: auto; padding: 20px;
+}
+.drawer-body::-webkit-scrollbar { width: 4px; }
+.drawer-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+/* drawer tab panels */
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* ── OVERVIEW TAB ────────────────────────────────────────────────────── */
+.detail-card {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 16px; margin-bottom: 14px;
+}
+.detail-card-title {
+  font-size: 11.5px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--text-2); margin-bottom: 12px;
+}
+.kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.kv-item {}
+.kv-label { font-size: 11.5px; color: var(--text-3); margin-bottom: 2px; }
+.kv-value { font-size: 13.5px; font-weight: 500; color: var(--text-1); }
+
+.proposal-card {
+  background: var(--warning-dim); border: 1px solid #FDE68A;
+  border-radius: var(--radius-sm); padding: 16px; margin-bottom: 14px;
+}
+.proposal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 14px;
+}
+.proposal-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--warning); }
+.proposal-payout { font-size: 26px; font-weight: 700; color: var(--text-1); letter-spacing: -1px; margin-bottom: 8px; }
+.proposal-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.proposal-summary { font-size: 13px; color: var(--text-2); line-height: 1.5; margin-bottom: 14px; }
+.btn-review {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 9px 18px; background: var(--warning); border: none;
+  border-radius: var(--radius-sm); font-size: 13.5px; font-weight: 600;
+  color: #fff; cursor: pointer; font-family: inherit; width: 100%;
+  justify-content: center;
+  transition: background 0.15s, transform 0.1s;
+}
+.btn-review:hover { background: #B45309; transform: translateY(-1px); }
+.btn-review svg { width: 14px; height: 14px; }
+
+/* ── REASONING TAB ───────────────────────────────────────────────────── */
+/* Consideración 2: el SSE se abre SOLO al hacer clic en esta pestaña */
+.reasoning-notice {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 12px 14px; background: var(--info-dim);
+  border: 1px solid #BAE6FD; border-radius: var(--radius-sm);
+  margin-bottom: 14px; font-size: 12.5px; color: #0369A1; line-height: 1.45;
+}
+.reasoning-notice svg { width: 15px; height: 15px; flex-shrink: 0; margin-top: 1px; color: #0284C7; }
+
+.reasoning-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.reasoning-label { font-size: 12px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.05em; }
+.reasoning-status {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-2);
+}
+.reasoning-status.live { color: var(--success); }
+.reasoning-status .rdot {
+  width: 6px; height: 6px; background: var(--success); border-radius: 50%; animation: pulse 1s infinite;
+}
+
+.reasoning-block {
+  background: #0F172A; border-radius: var(--radius-sm);
+  padding: 16px; min-height: 220px; max-height: 360px;
+  overflow-y: auto; font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; color: #CBD5E1; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word;
+}
+.reasoning-block::-webkit-scrollbar { width: 4px; }
+.reasoning-block::-webkit-scrollbar-thumb { background: #334155; border-radius: 99px; }
+.reasoning-block .r-ts { color: #475569; }
+.reasoning-block .r-think { color: #818CF8; }
+.reasoning-block .r-fact  { color: #34D399; }
+.reasoning-block .r-warn  { color: #FCD34D; }
+.reasoning-cursor { display: inline-block; width: 7px; height: 13px; background: #818CF8; animation: blink .8s step-end infinite; vertical-align: text-bottom; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+.btn-stop-sse {
+  display: flex; align-items: center; gap: 6px; margin-top: 10px;
+  padding: 7px 14px; background: var(--error-dim); border: none;
+  border-radius: var(--radius-sm); font-size: 12.5px; font-weight: 600;
+  color: var(--error); cursor: pointer; font-family: inherit;
+  transition: background 0.15s;
+}
+.btn-stop-sse:hover { background: #FECACA; }
+.btn-stop-sse svg { width: 13px; height: 13px; }
+
+/* ── EVENT LOG TAB ───────────────────────────────────────────────────── */
+.event-log { display: flex; flex-direction: column; gap: 0; }
+.ev-entry {
+  display: grid; grid-template-columns: 72px 20px 1fr;
+  gap: 0 10px; padding: 8px 0;
+  border-bottom: 1px solid var(--border-soft);
+  align-items: baseline;
+}
+.ev-entry:last-child { border-bottom: none; }
+.ev-ts { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--text-3); white-space: nowrap; }
+.ev-dot-wrap { display: grid; place-items: center; padding-top: 2px; }
+.ev-dot { width: 7px; height: 7px; border-radius: 50%; }
+.ev-dot.success { background: var(--success); }
+.ev-dot.info    { background: var(--accent); }
+.ev-dot.pending { background: var(--warning); animation: pulse 1.4s infinite; }
+.ev-dot.error   { background: var(--error); }
+.ev-type  { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1px; }
+.ev-type.success { color: var(--success); }
+.ev-type.info    { color: var(--accent); }
+.ev-type.pending { color: var(--warning); }
+.ev-type.error   { color: var(--error); }
+.ev-msg { font-size: 12.5px; color: var(--text-1); line-height: 1.4; }
+.ev-source { font-size: 11px; color: var(--text-3); font-family: 'JetBrains Mono', monospace; }
+
+/* ── EMPTY TABLE ─────────────────────────────────────────────────────── */
+.table-empty {
+  padding: 60px 20px; text-align: center;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+.table-empty svg { width: 28px; height: 28px; color: var(--text-3); }
+.table-empty p { font-size: 14px; color: var(--text-2); }
+.table-empty small { font-size: 12px; color: var(--text-3); }
+
+/* ── TOAST ───────────────────────────────────────────────────────────── */
+.toast-container { position: fixed; top: 68px; right: 24px; display: flex; flex-direction: column; gap: 8px; z-index: 999; }
+.toast {
+  display: flex; align-items: center; gap: 10px; padding: 11px 15px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow-md);
+  font-size: 13px; max-width: 300px; animation: toastIn 0.2s ease;
+}
+@keyframes toastIn { from{opacity:0;transform:translateX(12px)} to{opacity:1;transform:translateX(0)} }
+.toast-icon { flex-shrink: 0; width: 16px; height: 16px; }
+.toast.success .toast-icon { color: var(--success); }
+.toast.warning .toast-icon { color: var(--warning); }
+
+/* ── FOOTER ──────────────────────────────────────────────────────────── */
+footer {
+  border-top: 1px solid var(--border); padding: 18px 28px;
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px; color: var(--text-3);
+}
+.footer-links { display: flex; gap: 18px; }
+.footer-links a { color: var(--text-3); text-decoration: none; transition: color 0.15s; }
+.footer-links a:hover { color: var(--text-2); }
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <a href="claim-upload.html" class="nav-brand">
+    <div class="nav-logo">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <path d="M8 2L13 5v4c0 2.5-2 4.5-5 5C5 14.5 3 12.5 3 9V5L8 2z"/>
+      </svg>
+    </div>
+    LIA
+  </a>
+  <div class="nav-links">
+    <a href="claim-upload.html" class="nav-link">Nueva Reclamación</a>
+    <a href="monitoring.html"   class="nav-link active">Monitoreo</a>
+    <a href="#"                 class="nav-link">Historial</a>
+  </div>
+  <div class="nav-right">
+    <button class="nav-bell">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+        <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+      </svg>
+      <span class="nav-badge"></span>
+    </button>
+    <button class="nav-avatar" title="Octavio Sánchez Mendoza">OS</button>
+  </div>
+</nav>
+
+<!-- MAIN -->
+<main id="main">
+  <div class="page-header">
+    <div>
+      <p class="page-eyebrow">Gestión de Reclamaciones</p>
+      <h1 class="page-title">
+        Monitoreo en Vivo
+        <span class="live-indicator"><span class="live-dot"></span>En vivo</span>
+      </h1>
+    </div>
+    <a href="claim-upload.html" class="btn-new-claim">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      Nueva Reclamación
+    </a>
+  </div>
+
+  <!-- Metrics -->
+  <div class="metrics-row" id="metrics-row">
+    <div class="metric-card" data-filter="ALL" onclick="filterByMetric(this,'ALL')">
+      <div class="metric-label">Total</div>
+      <div class="metric-value" id="m-total">—</div>
+      <div class="metric-sub">reclamaciones activas</div>
+    </div>
+    <div class="metric-card" data-filter="PROCESSING" onclick="filterByMetric(this,'PROCESSING')">
+      <div class="metric-label">En Proceso</div>
+      <div class="metric-value processing" id="m-processing">—</div>
+      <div class="metric-sub">analizando</div>
+    </div>
+    <div class="metric-card" data-filter="AWAITING_INPUT" onclick="filterByMetric(this,'AWAITING_INPUT')">
+      <div class="metric-label">Pendiente HITL</div>
+      <div class="metric-value awaiting" id="m-awaiting">—</div>
+      <div class="metric-sub">esperan revisión humana</div>
+    </div>
+    <div class="metric-card" data-filter="ERROR" onclick="filterByMetric(this,'ERROR')">
+      <div class="metric-label">Error</div>
+      <div class="metric-value error" id="m-error">—</div>
+      <div class="metric-sub">requieren atención</div>
+    </div>
+    <div class="metric-card" data-filter="CONFIRMED" onclick="filterByMetric(this,'CONFIRMED')">
+      <div class="metric-label">Confirmados</div>
+      <div class="metric-value confirmed" id="m-confirmed">—</div>
+      <div class="metric-sub">hoy</div>
+    </div>
+  </div>
+
+  <!-- Filter bar -->
+  <div class="filter-bar">
+    <div class="search-wrap">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+      </svg>
+      <input class="input-search" id="search-input" placeholder="ID de reclamación o asegurado…" oninput="applyFilters()" />
+    </div>
+    <select class="select-filter" id="status-filter" onchange="applyFilters()">
+      <option value="ALL">Todos los estados</option>
+      <option value="PROCESSING">En Proceso</option>
+      <option value="AWAITING_INPUT">Pendiente HITL</option>
+      <option value="ERROR">Error</option>
+      <option value="CONFIRMED">Confirmado</option>
+    </select>
+    <button class="btn-filter-clear" onclick="clearFilters()">Limpiar</button>
+    <span class="filter-count" id="filter-count"><span id="fc-n">—</span> reclamaciones</span>
+  </div>
+
+  <!-- Table -->
+  <div class="table-wrap">
+    <table id="claims-table">
+      <thead>
+        <tr>
+          <th>Claim ID</th>
+          <th>Asegurado</th>
+          <th>Tipo</th>
+          <th>Estado</th>
+          <th>Agente</th>
+          <th>Última actividad</th>
+          <th>Pago est.</th>
+          <th>Severidad</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="table-body"></tbody>
+    </table>
+  </div>
+</main>
+
+<!-- Drawer overlay -->
+<div class="drawer-overlay" id="drawer-overlay" onclick="closeDrawer()"></div>
+
+<!-- Drawer -->
+<div class="drawer" id="drawer">
+  <div class="drawer-header">
+    <div class="drawer-toprow">
+      <span class="drawer-claim-id" id="d-claim-id">—</span>
+      <button class="btn-drawer-close" onclick="closeDrawer()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="drawer-holder" id="d-holder">—</div>
+    <div class="drawer-meta" id="d-meta">
+      <span id="d-type">—</span>
+      <span class="meta-sep">·</span>
+      <span id="d-status-badge"></span>
+    </div>
+    <div class="drawer-tabs">
+      <button class="drawer-tab active" data-tab="overview"   onclick="switchTab('overview')">Resumen</button>
+      <button class="drawer-tab"        data-tab="reasoning"  onclick="switchTab('reasoning')">
+        Razonamiento IA
+        <span class="tab-badge" id="reasoning-badge" style="display:none"></span>
+      </button>
+      <button class="drawer-tab"        data-tab="eventlog"   onclick="switchTab('eventlog')">Eventos</button>
+    </div>
+  </div>
+
+  <div class="drawer-body">
+    <!-- Overview tab -->
+    <div class="tab-panel active" id="tab-overview">
+      <div class="detail-card">
+        <div class="detail-card-title">Detalles de la Reclamación</div>
+        <div class="kv-grid" id="d-kv-grid">
+          <div class="kv-item"><div class="kv-label">N° de Póliza</div><div class="kv-value" id="d-policy">—</div></div>
+          <div class="kv-item"><div class="kv-label">Fecha del Siniestro</div><div class="kv-value" id="d-date-loss">—</div></div>
+          <div class="kv-item"><div class="kv-label">Tipo</div><div class="kv-value" id="d-claim-type">—</div></div>
+          <div class="kv-item"><div class="kv-label">Ajustador</div><div class="kv-value">Octavio Sánchez Mendoza</div></div>
+        </div>
+      </div>
+      <div id="d-proposal-section"></div>
+    </div>
+
+    <!-- Reasoning tab -->
+    <div class="tab-panel" id="tab-reasoning">
+      <!-- Consideración 2: SSE bajo demanda — aviso explícito al usuario -->
+      <div class="reasoning-notice">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <span>La conexión SSE se abre al ver esta pestaña y se cierra al salir. Máx. 3 conexiones simultáneas por sesión.</span>
+      </div>
+      <div class="reasoning-toolbar">
+        <span class="reasoning-label">AI Agent Reasoning Stream</span>
+        <span class="reasoning-status" id="r-status">— sin conexión</span>
+      </div>
+      <div class="reasoning-block" id="r-block"><span style="color:#475569">// Esperando conexión SSE…</span></div>
+      <button class="btn-stop-sse" id="btn-stop-sse" onclick="stopSSE()" style="display:none">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+        Detener stream
+      </button>
+    </div>
+
+    <!-- Event Log tab -->
+    <div class="tab-panel" id="tab-eventlog">
+      <div class="event-log" id="d-event-log"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Toasts -->
+<div class="toast-container" id="toasts"></div>
+
+<footer>
+  <span>LIA v2.4.0 · © 2025</span>
+  <div class="footer-links">
+    <a href="#">Soporte</a><a href="#">Privacidad</a><a href="#">Docs</a>
+  </div>
+</footer>
+
+<script src="api.js"></script>
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   DATA — se llena exclusivamente desde el backend (/pending).
+   Sin mocks: si no hay reclamaciones analizadas, la tabla muestra
+   su estado vacío.
+═══════════════════════════════════════════════════════════════ */
+const CLAIMS = [];
+
+/* ═══════════════════════════════════════════════════════════════
+   STATE
+═══════════════════════════════════════════════════════════════ */
+let activeFilter   = 'ALL';
+let searchTerm     = '';
+let selectedClaim  = null;
+let activeTab      = 'overview';
+// Consideración 2: una sola variable para el EventSource activo
+// se cierra explícitamente al cambiar de pestaña o cerrar el drawer
+let activeSSE      = null;
+let sseInterval    = null;
+
+/* ═══════════════════════════════════════════════════════════════
+   METRICS
+═══════════════════════════════════════════════════════════════ */
+function updateMetrics() {
+  document.getElementById('m-total').textContent      = CLAIMS.length;
+  document.getElementById('m-processing').textContent = CLAIMS.filter(c=>c.status==='PROCESSING').length;
+  document.getElementById('m-awaiting').textContent   = CLAIMS.filter(c=>c.status==='AWAITING_INPUT').length;
+  document.getElementById('m-error').textContent      = CLAIMS.filter(c=>c.status==='ERROR'||c.status==='MANUAL_REVIEW').length;
+  document.getElementById('m-confirmed').textContent  = CLAIMS.filter(c=>c.status==='CONFIRMED').length;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   FILTER
+═══════════════════════════════════════════════════════════════ */
+function filterByMetric(card, status) {
+  document.querySelectorAll('.metric-card').forEach(c => c.classList.remove('active'));
+  card.classList.add('active');
+  activeFilter = status;
+  document.getElementById('status-filter').value = status;
+  applyFilters();
+}
+
+function applyFilters() {
+  searchTerm   = document.getElementById('search-input').value.toLowerCase();
+  activeFilter = document.getElementById('status-filter').value;
+  renderTable();
+}
+
+function clearFilters() {
+  document.getElementById('search-input').value = '';
+  document.getElementById('status-filter').value = 'ALL';
+  document.querySelectorAll('.metric-card').forEach(c => c.classList.remove('active'));
+  document.querySelector('[data-filter="ALL"]').classList.add('active');
+  activeFilter = 'ALL'; searchTerm = '';
+  renderTable();
+}
+
+function filteredClaims() {
+  return CLAIMS.filter(c => {
+    const statusOk = activeFilter === 'ALL' || c.status === activeFilter;
+    const searchOk = !searchTerm
+      || c.id.toLowerCase().includes(searchTerm)
+      || c.holder.toLowerCase().includes(searchTerm);
+    return statusOk && searchOk;
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   TABLE RENDER
+═══════════════════════════════════════════════════════════════ */
+const STATUS_META = {
+  PROCESSING:    { cls:'b-processing',  label:'En Proceso' },
+  AWAITING_INPUT:{ cls:'b-awaiting',    label:'Pdte. HITL' },
+  CONFIRMED:     { cls:'b-confirmed',   label:'Confirmado' },
+  ERROR:         { cls:'b-error',       label:'Error' },
+  MANUAL_REVIEW: { cls:'b-manual',      label:'Rev. Manual' },
+};
+const SEV_META = {
+  LOW:   { cls:'b-sev-low',    label:'Baja' },
+  MEDIUM:{ cls:'b-sev-medium', label:'Media' },
+  HIGH:  { cls:'b-sev-high',   label:'Alta' },
+};
+
+function statusBadge(s) {
+  const m = STATUS_META[s] || { cls:'b-processing', label:s };
+  return `<span class="badge ${m.cls}"><span class="badge-dot"></span>${m.label}</span>`;
+}
+function sevBadge(s) {
+  if (!s) return '<span style="color:var(--text-3);font-size:12px">—</span>';
+  const m = SEV_META[s] || { cls:'', label:s };
+  return `<span class="badge ${m.cls}">${m.label}</span>`;
+}
+
+function renderTable() {
+  const list = filteredClaims();
+  document.getElementById('fc-n').textContent = list.length;
+  const tbody = document.getElementById('table-body');
+  if (list.length === 0) {
+    const noData = CLAIMS.length === 0;
+    tbody.innerHTML = `<tr><td colspan="9"><div class="table-empty">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      ${noData
+        ? `<p>Sin reclamaciones aún</p><small>Sube un documento en “Nueva reclamación” para iniciar el análisis</small>`
+        : `<p>Sin resultados</p><small>Prueba con otro filtro o término de búsqueda</small>`}
+    </div></td></tr>`;
+    return;
+  }
+  tbody.innerHTML = list.map(c => `
+    <tr id="tr-${c.id}" class="${selectedClaim?.id === c.id ? 'selected' : ''}" onclick="openDrawer('${c.id}')">
+      <td class="td-claim-id">${c.id}</td>
+      <td class="td-holder">${c.holder}</td>
+      <td class="td-type">${c.type}</td>
+      <td>${statusBadge(c.status)}</td>
+      <td class="td-agent">${c.agent}</td>
+      <td class="td-ts">${c.ts}</td>
+      <td class="td-payout ${!c.payout?'empty':''}">${c.payout || '—'}</td>
+      <td>${sevBadge(c.severity)}</td>
+      <td><button class="btn-view" onclick="event.stopPropagation();openDrawer('${c.id}')">Ver</button></td>
+    </tr>
+  `).join('');
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   DRAWER
+═══════════════════════════════════════════════════════════════ */
+function openDrawer(claimId) {
+  const c = CLAIMS.find(x => x.id === claimId);
+  if (!c) return;
+
+  // cerrar SSE de la vista anterior si estaba abierta
+  stopSSE();
+
+  selectedClaim = c;
+  renderTable(); // actualiza fila seleccionada
+
+  // header
+  document.getElementById('d-claim-id').textContent = c.id;
+  document.getElementById('d-holder').textContent   = c.holder;
+  document.getElementById('d-type').textContent     = c.type;
+  document.getElementById('d-status-badge').innerHTML = statusBadge(c.status);
+
+  // overview
+  document.getElementById('d-policy').textContent     = c.policy;
+  document.getElementById('d-date-loss').textContent  = c.dateLoss;
+  document.getElementById('d-claim-type').textContent = c.type;
+
+  // proposal section
+  const ps = document.getElementById('d-proposal-section');
+  if (c.proposal) {
+    const sevM = SEV_META[c.proposal.severity] || {};
+    ps.innerHTML = `
+      <div class="proposal-card">
+        <div class="proposal-header">
+          <span class="proposal-title">Propuesta de Triage IA</span>
+          <span class="badge b-awaiting"><span class="badge-dot"></span>Requiere acción</span>
+        </div>
+        <div class="proposal-payout">${c.proposal.payout}</div>
+        <div class="proposal-meta">
+          ${sevBadge(c.proposal.severity)}
+          <span class="badge" style="background:var(--info-dim);color:var(--info)">Conf. ${c.proposal.confidence}%</span>
+        </div>
+        <div class="proposal-summary">${c.proposal.summary}</div>
+        <button class="btn-review" onclick="navigateToHITL('${c.id}')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          Revisar Propuesta
+        </button>
+      </div>`;
+  } else {
+    ps.innerHTML = '';
+  }
+
+  // reasoning reset
+  document.getElementById('r-block').innerHTML = '<span style="color:#475569">// Haz clic en esta pestaña para iniciar el stream SSE…</span>';
+  document.getElementById('r-status').className = 'reasoning-status';
+  document.getElementById('r-status').textContent = '— sin conexión';
+  document.getElementById('btn-stop-sse').style.display = 'none';
+  document.getElementById('reasoning-badge').style.display = c.status === 'PROCESSING' ? 'inline-block' : 'none';
+
+  // event log
+  renderEventLog(c);
+
+  // switch to overview
+  switchTab('overview');
+
+  // open
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('drawer-overlay').classList.add('open');
+  document.getElementById('main').classList.add('drawer-open');
+}
+
+function closeDrawer() {
+  stopSSE(); // Consideración 2: cerrar SSE al cerrar el drawer
+  selectedClaim = null;
+  document.getElementById('drawer').classList.remove('open');
+  document.getElementById('drawer-overlay').classList.remove('open');
+  document.getElementById('main').classList.remove('drawer-open');
+  renderTable();
+}
+
+function switchTab(tab) {
+  // Consideración 2: cerrar SSE al salir de la pestaña de razonamiento
+  if (activeTab === 'reasoning' && tab !== 'reasoning') {
+    stopSSE();
+  }
+  activeTab = tab;
+
+  document.querySelectorAll('.drawer-tab').forEach(b => {
+    b.classList.toggle('active', b.dataset.tab === tab);
+  });
+  document.querySelectorAll('.tab-panel').forEach(p => {
+    p.classList.toggle('active', p.id === 'tab-' + tab);
+  });
+
+  // Consideración 2: abrir SSE SOLO al hacer clic en esta pestaña
+  if (tab === 'reasoning' && selectedClaim) {
+    startSSE(selectedClaim);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SSE SIMULATION (Consideración 2 — bajo demanda estrictamente)
+═══════════════════════════════════════════════════════════════ */
+const REASONING_CHUNKS = [
+  '<span class="r-ts">[+0.0s]</span> <span class="r-think">THINKING</span> Analizando documentos del siniestro…',
+  '<span class="r-ts">[+0.3s]</span> <span class="r-fact">FACT</span>     Póliza vigente — fecha de pérdida dentro del período de cobertura.',
+  '<span class="r-ts">[+0.7s]</span> <span class="r-think">THINKING</span> Revisando cláusula 4.2 (deducible aplicable)…',
+  '<span class="r-ts">[+1.1s]</span> <span class="r-fact">FACT</span>     Daño documentado en páginas 3-5 del peritaje.',
+  '<span class="r-ts">[+1.5s]</span> <span class="r-think">THINKING</span> Comparando monto con historial de siniestros similares…',
+  '<span class="r-ts">[+1.9s]</span> <span class="r-fact">FACT</span>     Percentil 73 vs. reclamaciones equivalentes. Dentro del rango esperado.',
+  '<span class="r-ts">[+2.3s]</span> <span class="r-think">THINKING</span> Generando propuesta de triage con severidad y monto recomendado…',
+  '<span class="r-ts">[+2.7s]</span> <span class="r-think">THINKING</span> Validando coherencia severidad ↔ monto (regla determinista)…',
+  '<span class="r-ts">[+3.0s]</span> <span class="r-fact">RESULT</span>   Propuesta lista. Enviando a HITL queue.',
+];
+
+function startSSE(claim) {
+  if (activeSSE) return; // ya hay una conexión activa
+  if (claim.status === 'CONFIRMED' || claim.status === 'ERROR') {
+    document.getElementById('r-block').innerHTML = `<span style="color:#475569">// Este claim ya no tiene stream activo (estado: ${claim.status}).</span>`;
+    return;
+  }
+
+  document.getElementById('r-status').className = 'reasoning-status live';
+  document.getElementById('r-status').innerHTML = '<span class="rdot"></span> conectado';
+  document.getElementById('btn-stop-sse').style.display = 'flex';
+  document.getElementById('r-block').innerHTML = '';
+
+  // simulamos EventSource: en producción sería new EventSource(`/claims/${claim.id}/reasoning`)
+  activeSSE = true; // flag — en prod: activeSSE = new EventSource(url)
+  let idx = 0;
+
+  sseInterval = setInterval(() => {
+    if (idx < REASONING_CHUNKS.length) {
+      const block = document.getElementById('r-block');
+      if (!block) { stopSSE(); return; }
+      block.innerHTML += REASONING_CHUNKS[idx] + '\n';
+      block.scrollTop = block.scrollHeight;
+      idx++;
+    } else {
+      // stream terminó
+      const block = document.getElementById('r-block');
+      if (block) block.innerHTML += '<span class="reasoning-cursor"></span>';
+      document.getElementById('r-status').innerHTML = '<span class="rdot" style="background:var(--warning)"></span> stream inactivo';
+      stopSSE();
+    }
+  }, 600);
+}
+
+function stopSSE() {
+  // En producción: if (activeSSE) { activeSSE.close(); activeSSE = null; }
+  if (sseInterval) { clearInterval(sseInterval); sseInterval = null; }
+  activeSSE = null;
+  const stopBtn = document.getElementById('btn-stop-sse');
+  if (stopBtn) stopBtn.style.display = 'none';
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   EVENT LOG
+═══════════════════════════════════════════════════════════════ */
+const EV_TYPE_CLASS = { info:'info', success:'success', warning:'pending', pending:'pending', error:'error' };
+
+function renderEventLog(c) {
+  const el = document.getElementById('d-event-log');
+  el.innerHTML = c.events.map(e => `
+    <div class="ev-entry">
+      <span class="ev-ts">${c.ts}</span>
+      <div class="ev-dot-wrap"><div class="ev-dot ${EV_TYPE_CLASS[e.type]||'info'}"></div></div>
+      <div>
+        <div class="ev-type ${EV_TYPE_CLASS[e.type]||'info'}">${e.ev}</div>
+        <div class="ev-msg">${e.msg}</div>
+        <div class="ev-source">${e.src}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   TOAST
+═══════════════════════════════════════════════════════════════ */
+function showToast(type, text) {
+  const t = document.createElement('div');
+  t.className = 'toast ' + type;
+  const icons = {
+    success:`<svg class="toast-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="16 8 10 14 7 11"/></svg>`,
+    warning:`<svg class="toast-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
+  };
+  t.innerHTML = (icons[type]||icons.success) + `<span>${text}</span>`;
+  document.getElementById('toasts').appendChild(t);
+  setTimeout(() => { t.style.opacity='0'; t.style.transform='translateX(12px)'; t.style.transition='.2s'; setTimeout(()=>t.remove(),200); }, 4000);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   NAVIGATE TO HITL — saves proposal cache before leaving
+═══════════════════════════════════════════════════════════════ */
+function navigateToHITL(claimId) {
+  const c = CLAIMS.find(x => x.id === claimId);
+  if (c) saveProposalCache(claimId, c);
+  window.location.href = 'hitl.html?claim=' + encodeURIComponent(claimId);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   REAL DATA — merge two sources:
+     • /pending  (Redis)    → in-flight proposals awaiting HITL
+     • /claims   (Postgres) → persisted, decided claims
+═══════════════════════════════════════════════════════════════ */
+const _MONEY = v => v == null ? null : '$' + Number(v).toLocaleString();
+const _HHMMSS = iso => (iso ? new Date(iso) : new Date()).toLocaleTimeString('es-MX', { hour12: false });
+
+// Map the claims table status vocabulary onto the monitoring board's.
+function mapClaimStatus(s) {
+  switch ((s || '').toUpperCase()) {
+    case 'APPROVED':       return 'CONFIRMED';
+    case 'AWAITING_INPUT': return 'AWAITING_INPUT';
+    case 'MANUAL_REVIEW':  return 'MANUAL_REVIEW';
+    case 'REJECTED':       return 'ERROR';
+    default:               return 'PROCESSING';   // SUBMITTED / UNDER_REVIEW
+  }
+}
+
+async function fetchRealClaims() {
+  // Single durable source of truth: the Postgres `claims` table. Every analyzed
+  // claim is persisted at intake (AWAITING_INPUT), so this covers pending and
+  // decided alike — no Redis dependency, no duplicate rows.
+  const rows = [];
+  try {
+    const data = await getClaims();
+    const claims = (data && Array.isArray(data.claims)) ? data.claims : [];
+    for (const c of claims) {
+      const sev = c.severity ? c.severity.toUpperCase() : null;
+      const st  = mapClaimStatus(c.status);
+      rows.push({
+        id: c.id, holder: c.claimant_sub || c.submitted_by_sub || 'Asegurado', type: 'Reclamación',
+        status: st, agent: 'LIA', ts: _HHMMSS(c.created_at),
+        payout: _MONEY(c.reported_damage_amount), severity: sev,
+        policy: c.policy_id || '—', dateLoss: '—',
+        proposal: { payout: _MONEY(c.reported_damage_amount) || '—', severity: sev || 'MEDIUM',
+                    confidence: 100, summary: c.ai_summary || `Claim (${c.status}).` },
+        events: [
+          { type:'info',    ev:'PIPELINE_START',  msg:'Request inicializado.', src:'orchestrator' },
+          { type: st === 'AWAITING_INPUT' ? 'warning' : 'success',
+            ev: st === 'AWAITING_INPUT' ? 'TRIAGE_PROPOSAL' : 'CLAIM_PERSISTED',
+            msg: st === 'AWAITING_INPUT' ? 'Propuesta lista — esperando revisión humana.' : `Estado: ${c.status}.`,
+            src: 'hitl-service' },
+        ],
+      });
+    }
+  } catch (e) { console.warn('[monitoring] /claims error:', e); }
+
+  const seen = new Set();
+  CLAIMS.length = 0;
+  for (const r of rows) { if (!seen.has(r.id)) { seen.add(r.id); CLAIMS.push(r); } }
+
+  updateMetrics();
+  renderTable();
+  if (CLAIMS.length) showToast('success', `${CLAIMS.length} reclamación(es) cargada(s) del backend.`);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   INIT
+═══════════════════════════════════════════════════════════════ */
+updateMetrics();
+renderTable();
+
+// Si viene desde Interface 1 con un ?claim=R-XXXXX en la URL, abrir ese drawer
+const urlParams = new URLSearchParams(window.location.search);
+const preselect = urlParams.get('claim');
+if (preselect) setTimeout(() => openDrawer(preselect), 400);
+
+// Backend status chip + session + real data
+(async () => {
+  const backendOk = await mountBackendStatus();
+  mountSessionBar();
+
+  const session = loadSession();
+  if (!session) {
+    buildLoginModal({
+      requiredRole: 'analyst',
+      onSuccess: ({ sub }) => {
+        mountSessionBar();
+        const av = document.querySelector('.nav-avatar');
+        if (av) av.textContent = sub.substring(0, 2).toUpperCase();
+        if (backendOk) fetchRealClaims();
+      }
+    });
+  } else {
+    const av = document.querySelector('.nav-avatar');
+    if (av) av.textContent = session.sub.substring(0, 2).toUpperCase();
+    if (backendOk) fetchRealClaims();
+  }
+})();
+</script>
+</body>
+</html>

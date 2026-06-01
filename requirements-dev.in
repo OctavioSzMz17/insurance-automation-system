@@ -1,0 +1,20 @@
+# requirements-dev.in — abstract dev/quality dependencies.
+#
+# Compiled to requirements-dev.txt by:
+#     scripts/security/compile_requirements.sh
+#
+# These are NEVER installed in Docker images (Rule 12).
+
+-r requirements.in
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest>=8.3,<9
+pytest-asyncio>=0.24,<1
+
+# ── Linting / type checking ───────────────────────────────────────────────────
+ruff>=0.7,<1
+mypy>=1.13,<2
+
+# ── Security scanning ─────────────────────────────────────────────────────────
+bandit>=1.7,<2
+pip-audit>=2.7,<3

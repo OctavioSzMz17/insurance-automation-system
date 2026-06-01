@@ -1,0 +1,9 @@
+# Orchestrator (analyst + auditor + HITL + mutation handler) — reuses the MCP base venv.
+FROM insurance-mcp-base:latest
+
+# Copy the orchestrator source — the base image only carries mcp-servers/ and packages/.
+COPY --chown=appuser:app ai-orchestrator /app/ai-orchestrator
+
+ENV PYTHONPATH="/app:/app/mcp-servers:/app/ai-orchestrator"
+EXPOSE 8000
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--app-dir", "/app/ai-orchestrator"]

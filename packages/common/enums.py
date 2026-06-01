@@ -1,30 +1,45 @@
-"""Shared enums for the Insurance Automation System.
+"""Domain enums shared across services. Single source of truth (ai-rules Rule 1)."""
+from __future__ import annotations
 
-These mirror the PostgreSQL ENUM types defined in the database schema.
-Rule 1: All enums live exclusively in packages/common/ — never redefined elsewhere.
-"""
-
-from enum import Enum
+from enum import StrEnum
 
 
-class PolicyStatus(str, Enum):
-    """Lifecycle state of an insurance policy."""
+class UserRole(StrEnum):
+    """System staff roles (the `users` table). Insured customers live in
+    `clients` and have no role."""
+    ANALYST = "ANALYST"
+    ADMIN = "ADMIN"
+    AUDITOR = "AUDITOR"
+
+
+class PolicyStatus(StrEnum):
     ACTIVE = "ACTIVE"
     EXPIRED = "EXPIRED"
-    PENDING_PAYMENT = "PENDING_PAYMENT"
     CANCELLED = "CANCELLED"
+    SUSPENDED = "SUSPENDED"
 
 
-class SeverityLabel(str, Enum):
-    """AI-interpreted severity of a claim incident."""
-    LOW = "LOW"
-    HIGH = "HIGH"
-    TOTAL_LOSS = "TOTAL_LOSS"
-
-
-class ClaimStatus(str, Enum):
-    """Processing state of a claim."""
+class ClaimStatus(StrEnum):
+    SUBMITTED = "SUBMITTED"
+    AWAITING_INPUT = "AWAITING_INPUT"
+    UNDER_REVIEW = "UNDER_REVIEW"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     MANUAL_REVIEW = "MANUAL_REVIEW"
-    AWAITING_INPUT = "AWAITING_INPUT"
+
+
+TERMINAL_CLAIM_STATUSES: frozenset[ClaimStatus] = frozenset(
+    {ClaimStatus.APPROVED, ClaimStatus.REJECTED, ClaimStatus.MANUAL_REVIEW}
+)
+
+
+class SeverityLabel(StrEnum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+
+class ErrorKind(StrEnum):
+    BUSINESS = "business"
+    INTERNAL = "internal"

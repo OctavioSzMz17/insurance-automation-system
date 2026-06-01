@@ -1,0 +1,1326 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LIA — Revisión HITL</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;1,14..32,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:          #F7F8FA;
+  --surface:     #FFFFFF;
+  --border:      #E4E7EC;
+  --border-soft: #F0F2F5;
+  --text-1:      #111827;
+  --text-2:      #6B7280;
+  --text-3:      #9CA3AF;
+  --accent:      #5B5BD6;
+  --accent-dim:  #EDEDFB;
+  --accent-dark: #4747C2;
+  --success:     #059669;
+  --success-dim: #D1FAE5;
+  --warning:     #D97706;
+  --warning-dim: #FEF3C7;
+  --error:       #DC2626;
+  --error-dim:   #FEE2E2;
+  --risk-bg:     #FFF7ED;
+  --risk-border: #FED7AA;
+  --risk-text:   #C2410C;
+  --shadow-sm:   0 0 0 1px rgba(0,0,0,0.06), 0 2px 8px rgba(0,0,0,0.05);
+  --shadow-md:   0 0 0 1px rgba(0,0,0,0.06), 0 4px 20px rgba(0,0,0,0.08);
+  --shadow-lg:   0 0 0 1px rgba(0,0,0,0.06), 0 8px 40px rgba(0,0,0,0.12);
+  --radius:      12px;
+  --radius-sm:   8px;
+  --radius-xs:   6px;
+  --footer-h:    72px;
+}
+
+html { font-size: 15px; }
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text-1);
+  min-height: 100vh;
+  padding-bottom: var(--footer-h);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── NAV (simplificado) ──────────────────────────────────────────────── */
+nav {
+  position: sticky; top: 0; z-index: 100;
+  height: 56px;
+  background: rgba(255,255,255,0.9);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center;
+  padding: 0 24px; gap: 16px;
+}
+.nav-back {
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 12px; background: none;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-size: 13px; font-weight: 500; color: var(--text-2);
+  cursor: pointer; font-family: inherit; text-decoration: none;
+  transition: background 0.15s, color 0.15s;
+}
+.nav-back:hover { background: var(--bg); color: var(--text-1); }
+.nav-back svg { width: 14px; height: 14px; }
+.nav-brand {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 14px; font-weight: 600; color: var(--text-1);
+  text-decoration: none;
+}
+.nav-logo { width: 26px; height: 26px; background: var(--accent); border-radius: 6px; display: grid; place-items: center; }
+.nav-logo svg { width: 14px; height: 14px; color: #fff; }
+.nav-sep { width: 1px; height: 20px; background: var(--border); }
+.nav-claim-chip {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 12px; background: var(--accent-dim);
+  border-radius: 99px;
+}
+.nav-claim-chip .chip-id { font-family: 'JetBrains Mono', monospace; font-size: 12.5px; font-weight: 600; color: var(--accent); }
+.nav-claim-chip .chip-badge { font-size: 11px; font-weight: 600; color: var(--warning); background: var(--warning-dim); padding: 2px 7px; border-radius: 99px; }
+.nav-right { margin-left: auto; display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-2); }
+.nav-avatar { width: 30px; height: 30px; background: var(--accent-dim); border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 600; color: var(--accent); border: none; cursor: pointer; }
+
+/* ── RISK BANNER ─────────────────────────────────────────────────────── */
+/* Consideración 3: muestra reintentos y/o flags de inyección, NO mismatch */
+.risk-banner {
+  background: var(--risk-bg);
+  border-bottom: 1px solid var(--risk-border);
+  padding: 10px 24px;
+  display: flex; align-items: flex-start; gap: 12px;
+}
+.risk-banner.hidden { display: none; }
+.risk-icon { width: 18px; height: 18px; flex-shrink: 0; margin-top: 1px; color: var(--risk-text); }
+.risk-content { flex: 1; }
+.risk-title { font-size: 13px; font-weight: 700; color: var(--risk-text); margin-bottom: 3px; }
+.risk-items { display: flex; flex-direction: column; gap: 3px; }
+.risk-item { font-size: 12.5px; color: #9A3412; display: flex; align-items: center; gap: 6px; }
+.risk-item::before { content: '·'; font-weight: 700; color: var(--risk-text); }
+.risk-actions { display: flex; gap: 8px; margin-top: 8px; }
+.btn-risk-detail {
+  padding: 4px 12px; background: none;
+  border: 1px solid var(--risk-border); border-radius: 99px;
+  font-size: 12px; font-weight: 500; color: var(--risk-text);
+  cursor: pointer; font-family: inherit;
+  transition: background 0.15s;
+}
+.btn-risk-detail:hover { background: #FEE2C8; }
+
+/* ── CLAIM HEADER BAR ────────────────────────────────────────────────── */
+.claim-header-bar {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 14px 24px;
+  display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+}
+.ch-field { display: flex; flex-direction: column; gap: 2px; }
+.ch-label { font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-3); }
+.ch-value { font-size: 14px; font-weight: 500; color: var(--text-1); }
+.ch-value.mono { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--accent); }
+.ch-sep { width: 1px; height: 36px; background: var(--border); }
+.badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border-radius: 99px; font-size: 11.5px; font-weight: 600; white-space: nowrap; }
+.b-awaiting { background: var(--warning-dim); color: var(--warning); }
+.b-confirmed { background: var(--success-dim); color: var(--success); }
+.b-error    { background: var(--error-dim);   color: var(--error); }
+.badge-dot  { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: pulse 1.2s infinite; }
+@keyframes pulse { 0%,100%{opacity:.4} 50%{opacity:1} }
+
+/* ── TWO-COLUMN LAYOUT ───────────────────────────────────────────────── */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1.15fr;
+  gap: 20px;
+  padding: 20px 24px;
+  max-width: 1400px; margin: 0 auto;
+  align-items: start;
+}
+
+/* ── COLUMN HEADERS ──────────────────────────────────────────────────── */
+.col-head {
+  display: flex; align-items: center; gap: 9px;
+  padding: 10px 16px; border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  margin-bottom: -1px; position: relative; z-index: 1;
+}
+.col-head-left  { background: #EFF6FF; color: #1D4ED8; border: 1px solid #BFDBFE; border-bottom: none; }
+.col-head-right { background: #FFFBEB; color: #B45309; border: 1px solid #FDE68A; border-bottom: none; }
+.col-head svg { width: 14px; height: 14px; }
+
+/* ── SECTION CARD ────────────────────────────────────────────────────── */
+.section-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 0 0 var(--radius) var(--radius);
+  overflow: hidden; box-shadow: var(--shadow-sm);
+  margin-bottom: 16px;
+}
+.section-card.first { border-radius: var(--radius); }
+.section-inner { padding: 16px; }
+.section-title {
+  font-size: 12px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.05em; color: var(--text-2);
+  padding: 12px 16px; border-bottom: 1px solid var(--border-soft);
+  background: var(--bg);
+}
+
+/* ── PDF VIEWER ──────────────────────────────────────────────────────── */
+.pdf-doc-list { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--border-soft); }
+.pdf-doc-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: var(--radius-xs);
+  cursor: pointer; transition: background 0.12s;
+  border: 1px solid transparent;
+}
+.pdf-doc-item:hover { background: var(--bg); }
+.pdf-doc-item.active { background: var(--accent-dim); border-color: #C4C4EE; }
+.pdf-thumb { width: 32px; height: 40px; background: #FEE2E2; border-radius: 4px; display: grid; place-items: center; flex-shrink: 0; }
+.pdf-thumb svg { width: 16px; height: 16px; color: #EF4444; }
+.pdf-doc-name { font-size: 13px; font-weight: 500; color: var(--text-1); }
+.pdf-doc-meta { font-size: 11.5px; color: var(--text-3); }
+
+.pdf-preview {
+  margin: 12px 16px;
+  background: #F8F9FA; border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  min-height: 220px;
+  display: flex; flex-direction: column;
+  font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
+  color: var(--text-2); line-height: 1.7;
+  overflow: hidden;
+}
+.pdf-preview-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 12px; background: var(--border-soft);
+  border-bottom: 1px solid var(--border);
+  font-family: 'Inter', sans-serif; font-size: 12px; color: var(--text-2);
+}
+.pdf-preview-content { padding: 16px; }
+.pdf-line { margin-bottom: 3px; }
+.pdf-line.title { font-size: 12.5px; font-weight: 700; color: var(--text-1); font-family: 'Inter', sans-serif; margin-bottom: 8px; }
+.pdf-line.bold  { font-weight: 600; color: var(--text-1); }
+
+/* ── EXTRACTED DATA TABLE ────────────────────────────────────────────── */
+.extracted-table { width: 100%; border-collapse: collapse; }
+.extracted-table th {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-3); padding: 8px 16px; background: var(--bg);
+  border-bottom: 1px solid var(--border-soft); text-align: left;
+}
+.extracted-table td { padding: 9px 16px; font-size: 13px; border-bottom: 1px solid var(--border-soft); vertical-align: middle; }
+.extracted-table tr:last-child td { border-bottom: none; }
+.extracted-table tr:hover td { background: #FAFBFC; }
+.et-key { font-weight: 500; color: var(--text-1); }
+.et-val { color: var(--text-1); }
+.et-src { font-size: 11px; color: var(--accent); font-family: 'JetBrains Mono', monospace; cursor: pointer; }
+.et-src:hover { text-decoration: underline; }
+
+/* ── TRIAGE PROPOSAL CARD ────────────────────────────────────────────── */
+.proposal-hero { padding: 20px 20px 16px; border-bottom: 1px solid var(--border-soft); }
+.proposal-payout { font-size: 36px; font-weight: 700; color: var(--text-1); letter-spacing: -1.5px; line-height: 1; margin-bottom: 12px; }
+.proposal-badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.b-sev-low    { background: var(--success-dim); color: var(--success); }
+.b-sev-medium { background: var(--warning-dim); color: var(--warning); }
+.b-sev-high   { background: var(--error-dim);   color: var(--error); }
+.b-conf       { background: #EFF6FF; color: #1D4ED8; }
+
+.confidence-bar-wrap { margin-top: 4px; }
+.confidence-label { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--text-2); margin-bottom: 5px; }
+.confidence-label strong { color: var(--text-1); }
+.confidence-bar { height: 6px; background: var(--border-soft); border-radius: 99px; overflow: hidden; }
+.confidence-fill { height: 100%; background: var(--accent); border-radius: 99px; transition: width 1s ease; }
+
+/* ── AI NARRATIVE (Consideración 4) ─────────────────────────────────── */
+/* Contenedor visualmente diferenciado para evitar ingeniería social */
+.ai-narrative-wrapper {
+  margin: 16px;
+  border: 1.5px solid #FCD34D;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  /* patrón sutil de advertencia en el fondo */
+  background:
+    repeating-linear-gradient(
+      45deg,
+      transparent,
+      transparent 12px,
+      rgba(251,191,36,0.04) 12px,
+      rgba(251,191,36,0.04) 13px
+    ),
+    #FFFBEB;
+}
+.ai-narrative-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 14px;
+  background: #FEF3C7; border-bottom: 1px solid #FCD34D;
+}
+.ai-narrative-header svg { width: 14px; height: 14px; color: #D97706; flex-shrink: 0; }
+.ai-narrative-label {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: #92400E;
+}
+.ai-narrative-sub { font-size: 10.5px; color: #A16207; margin-left: auto; font-style: italic; }
+.ai-narrative-body {
+  padding: 14px;
+  font-size: 13px; color: #451A03; line-height: 1.65;
+  font-style: italic;
+}
+
+/* ── EVIDENCE MATRIX ─────────────────────────────────────────────────── */
+.ev-matrix-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.ev-matrix-table th {
+  font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-3); padding: 8px 14px; background: var(--bg);
+  border-bottom: 1px solid var(--border-soft); text-align: left;
+}
+.ev-matrix-table td { padding: 9px 14px; border-bottom: 1px solid var(--border-soft); vertical-align: middle; }
+.ev-matrix-table tr:last-child td { border-bottom: none; }
+.em-fact { color: #1D4ED8; font-size: 12px; font-weight: 500; }
+.em-ai   { color: #92400E; font-size: 12px; font-style: italic; }
+.em-match { text-align: center; }
+.match-ok   { color: var(--success); font-size: 14px; }
+.match-warn { color: var(--warning); font-size: 14px; }
+.match-fail { color: var(--error);   font-size: 14px; }
+.em-conf  { font-size: 11.5px; color: var(--text-2); font-family: 'JetBrains Mono', monospace; }
+
+/* ── INJECTION FLAGS ─────────────────────────────────────────────────── */
+.injection-panel { padding: 12px 16px; }
+.injection-clear { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--success); }
+.injection-clear svg { width: 15px; height: 15px; }
+.injection-flags-list { display: flex; flex-direction: column; gap: 6px; }
+.injection-flag-item {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 8px 10px; background: #FFF7ED; border: 1px solid #FED7AA;
+  border-radius: var(--radius-xs); font-size: 12.5px; color: #9A3412;
+  cursor: pointer; transition: background 0.12s;
+}
+.injection-flag-item:hover { background: #FEE2C8; }
+.injection-flag-item svg { width: 13px; height: 13px; flex-shrink: 0; margin-top: 1px; color: var(--warning); }
+
+/* ── AGENT SIGNATURE ─────────────────────────────────────────────────── */
+.sig-section { padding: 14px 16px; }
+.sig-label { font-size: 11.5px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+.sig-label svg { width: 13px; height: 13px; color: var(--success); }
+.sig-input-wrap { display: flex; align-items: center; gap: 8px; }
+.sig-input {
+  flex: 1; padding: 8px 12px;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  color: var(--text-2); outline: none; cursor: default;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sig-valid-chip {
+  display: flex; align-items: center; gap: 5px;
+  padding: 4px 10px; background: var(--success-dim);
+  border-radius: 99px; font-size: 11.5px; font-weight: 600; color: var(--success);
+  white-space: nowrap;
+}
+.sig-valid-chip svg { width: 12px; height: 12px; }
+.sig-tooltip { font-size: 11.5px; color: var(--text-3); margin-top: 6px; line-height: 1.5; }
+
+/* ── FIXED ACTION FOOTER ─────────────────────────────────────────────── */
+/* Lift the floating session chip above the fixed action footer so it never
+   covers the Confirmar / Rechazar buttons. */
+#session-bar { bottom: calc(var(--footer-h) + 14px) !important; }
+
+/* ── PDF side viewer ─────────────────────────────────────────────────── */
+:root { --pdf-w: 44vw; }
+body { transition: padding-right .28s ease; }
+body.pdf-open { padding-right: var(--pdf-w); }
+#pdf-tab {
+  position: fixed; right: 0; top: 50%; transform: translateY(-50%);
+  z-index: 301; cursor: pointer; border: none;
+  background: var(--accent); color: #fff;
+  writing-mode: vertical-rl; text-orientation: mixed;
+  padding: 18px 9px; border-radius: 10px 0 0 10px;
+  font-size: 12.5px; font-weight: 600; letter-spacing: .04em;
+  box-shadow: -2px 0 12px rgba(0,0,0,0.16);
+  transition: right .28s ease, background .15s;
+  font-family: inherit; user-select: none;
+}
+#pdf-tab:hover { background: var(--accent-dark); }
+body.pdf-open #pdf-tab { right: var(--pdf-w); }
+#pdf-panel {
+  position: fixed; top: 56px; right: 0; bottom: 0;
+  width: var(--pdf-w); background: #525659;
+  border-left: 1px solid var(--border);
+  box-shadow: -10px 0 30px rgba(0,0,0,0.12);
+  transform: translateX(100%); transition: transform .28s ease;
+  z-index: 300; display: flex; flex-direction: column;
+}
+body.pdf-open #pdf-panel { transform: translateX(0); }
+.pdf-panel-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; background: #fff; border-bottom: 1px solid var(--border);
+  font-size: 13px; font-weight: 600; color: var(--text-1); flex-shrink: 0;
+}
+.pdf-panel-head button { background:none; border:none; cursor:pointer; color:var(--text-2); font-size:18px; line-height:1; padding:2px 8px; border-radius:6px; }
+.pdf-panel-head button:hover { background: var(--bg); color: var(--text-1); }
+#pdf-frame { flex: 1; width: 100%; border: none; background: #525659; }
+#pdf-empty { flex:1; display:grid; place-items:center; color:#D1D5DB; font-size:13px; text-align:center; padding:24px; }
+
+.action-footer {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
+  height: var(--footer-h);
+  background: rgba(255,255,255,0.95);
+  backdrop-filter: blur(12px);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -4px 20px rgba(0,0,0,0.06);
+  display: flex; align-items: center;
+  padding: 0 24px; gap: 12px;
+}
+.footer-info { font-size: 13px; color: var(--text-2); flex: 1; }
+.footer-info strong { color: var(--text-1); }
+
+.btn-reject {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 10px 22px; background: var(--surface);
+  border: 1.5px solid var(--border); border-radius: var(--radius-sm);
+  font-size: 13.5px; font-weight: 600; color: var(--text-1);
+  cursor: pointer; font-family: inherit;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.btn-reject:hover { border-color: var(--error); color: var(--error); background: var(--error-dim); }
+.btn-reject svg { width: 14px; height: 14px; }
+
+.btn-confirm {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 24px; background: var(--success);
+  border: none; border-radius: var(--radius-sm);
+  font-size: 13.5px; font-weight: 700; color: #fff;
+  cursor: pointer; font-family: inherit;
+  box-shadow: 0 1px 3px rgba(5,150,105,0.3), 0 4px 12px rgba(5,150,105,0.15);
+  transition: background 0.15s, transform 0.1s;
+}
+.btn-confirm:hover { background: #047857; transform: translateY(-1px); }
+.btn-confirm:active { transform: translateY(0); }
+.btn-confirm svg { width: 15px; height: 15px; }
+
+/* ── MODALS ──────────────────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(17,24,39,0.5);
+  z-index: 300; display: grid; place-items: center;
+  opacity: 0; pointer-events: none; transition: opacity 0.2s;
+}
+.modal-backdrop.open { opacity: 1; pointer-events: all; }
+
+.modal {
+  background: var(--surface); border-radius: var(--radius);
+  width: 480px; max-width: calc(100vw - 32px);
+  box-shadow: var(--shadow-lg);
+  transform: translateY(8px) scale(0.98);
+  transition: transform 0.2s;
+}
+.modal-backdrop.open .modal { transform: translateY(0) scale(1); }
+
+.modal-header {
+  padding: 20px 24px 0;
+  display: flex; align-items: flex-start; justify-content: space-between;
+}
+.modal-icon {
+  width: 40px; height: 40px; border-radius: 50%;
+  display: grid; place-items: center; margin-bottom: 14px;
+}
+.modal-icon.confirm { background: var(--success-dim); }
+.modal-icon.reject  { background: var(--error-dim); }
+.modal-icon svg { width: 20px; height: 20px; }
+.modal-icon.confirm svg { color: var(--success); }
+.modal-icon.reject  svg { color: var(--error); }
+.modal-title { font-size: 16px; font-weight: 700; color: var(--text-1); margin-bottom: 6px; letter-spacing: -0.3px; }
+.modal-desc  { font-size: 13.5px; color: var(--text-2); line-height: 1.55; margin-bottom: 16px; }
+
+.modal-body { padding: 0 24px 4px; }
+.modal-label { font-size: 12.5px; font-weight: 500; color: var(--text-2); margin-bottom: 6px; }
+.modal-label .optional { font-weight: 400; color: var(--text-3); }
+.modal-input, .modal-textarea {
+  width: 100%; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-size: 13.5px; color: var(--text-1); font-family: inherit;
+  outline: none; resize: vertical;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.modal-input:focus, .modal-textarea:focus {
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.modal-textarea { min-height: 90px; }
+
+.modal-footer {
+  padding: 16px 24px 20px;
+  display: flex; gap: 10px; justify-content: flex-end;
+}
+.btn-modal-cancel {
+  padding: 9px 18px; background: none;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-size: 13.5px; font-weight: 500; color: var(--text-2);
+  cursor: pointer; font-family: inherit; transition: background 0.15s;
+}
+.btn-modal-cancel:hover { background: var(--bg); }
+.btn-modal-action {
+  display: flex; align-items: center; gap: 7px;
+  padding: 9px 20px; border: none; border-radius: var(--radius-sm);
+  font-size: 13.5px; font-weight: 700; color: #fff;
+  cursor: pointer; font-family: inherit; transition: background 0.15s, transform 0.1s;
+}
+.btn-modal-action:hover { transform: translateY(-1px); }
+.btn-modal-action:active { transform: none; }
+.btn-modal-action.confirm { background: var(--success); }
+.btn-modal-action.confirm:hover { background: #047857; }
+.btn-modal-action.reject  { background: var(--error); }
+.btn-modal-action.reject:hover  { background: #B91C1C; }
+.btn-modal-action svg { width: 14px; height: 14px; }
+.spinner { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.35); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── INJECTION MODAL ─────────────────────────────────────────────────── */
+.inj-log-entry { padding: 10px 14px; background: var(--bg); border-radius: var(--radius-sm); margin-bottom: 8px; font-size: 12.5px; }
+.inj-log-entry .inj-ts { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-3); }
+.inj-log-entry .inj-msg { color: var(--text-1); margin-top: 2px; line-height: 1.4; }
+.inj-log-entry .inj-snippet { margin-top: 6px; padding: 6px 10px; background: #FFF7ED; border-left: 3px solid var(--warning); font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #92400E; border-radius: 0 4px 4px 0; }
+
+/* ── SUCCESS STATE ───────────────────────────────────────────────────── */
+.success-overlay {
+  position: fixed; inset: 0; background: rgba(255,255,255,0.96);
+  z-index: 400; display: none; place-items: center;
+  flex-direction: column; gap: 16px; text-align: center; padding: 24px;
+}
+.success-overlay.show { display: flex; }
+.success-check { width: 64px; height: 64px; background: var(--success-dim); border-radius: 50%; display: grid; place-items: center; }
+.success-check svg { width: 32px; height: 32px; color: var(--success); }
+.success-title { font-size: 22px; font-weight: 700; color: var(--text-1); letter-spacing: -0.5px; }
+.success-sub   { font-size: 14px; color: var(--text-2); max-width: 360px; line-height: 1.5; }
+.success-meta  { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-3); }
+.btn-success-back {
+  margin-top: 8px; display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 24px; background: var(--accent); border: none; border-radius: var(--radius-sm);
+  font-size: 14px; font-weight: 600; color: #fff; cursor: pointer; font-family: inherit;
+  text-decoration: none; transition: background 0.15s;
+}
+.btn-success-back:hover { background: var(--accent-dark); }
+</style>
+</head>
+<body>
+
+<!-- ── NAV ─────────────────────────────────────────────────────────── -->
+<nav>
+  <a href="monitoring.html" class="nav-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+    Monitoreo
+  </a>
+  <div class="nav-sep"></div>
+  <a href="#" class="nav-brand">
+    <div class="nav-logo">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <path d="M8 2L13 5v4c0 2.5-2 4.5-5 5C5 14.5 3 12.5 3 9V5L8 2z"/>
+      </svg>
+    </div>
+    LIA
+  </a>
+  <div class="nav-claim-chip">
+    <span class="chip-id" id="nav-claim-id">—</span>
+    <span class="chip-badge">Pdte. HITL</span>
+  </div>
+  <div class="nav-right">
+    Ajustador: <strong>Octavio Sánchez Mendoza</strong>
+    <button class="nav-avatar" title="Octavio Sánchez Mendoza">OS</button>
+  </div>
+</nav>
+
+<!-- ── RISK BANNER (Consideración 3) ───────────────────────────────── -->
+<!-- Solo se muestra por reintentos o flags de inyección, NO por mismatch severidad/monto -->
+<div class="risk-banner" id="risk-banner">
+  <svg class="risk-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+    <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+    <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+  </svg>
+  <div class="risk-content">
+    <div class="risk-title">ALERTA DE REVISIÓN</div>
+    <div class="risk-items" id="risk-items"><!-- populated by JS --></div>
+    <div class="risk-actions">
+      <button class="btn-risk-detail" id="btn-risk-retries" onclick="openInjectionModal()" style="display:none">Ver log de reintentos</button>
+      <button class="btn-risk-detail" id="btn-risk-injection" onclick="openInjectionModal()" style="display:none">Ver flags de inyección</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── CLAIM HEADER BAR ─────────────────────────────────────────────── -->
+<div class="claim-header-bar">
+  <div class="ch-field">
+    <span class="ch-label">Claim ID</span>
+    <span class="ch-value mono" id="h-claim-id">—</span>
+  </div>
+  <div class="ch-sep"></div>
+  <div class="ch-field">
+    <span class="ch-label">Asegurado</span>
+    <span class="ch-value" id="h-holder">—</span>
+  </div>
+  <div class="ch-sep"></div>
+  <div class="ch-field">
+    <span class="ch-label">Tipo de Siniestro</span>
+    <span class="ch-value" id="h-type">—</span>
+  </div>
+  <div class="ch-sep"></div>
+  <div class="ch-field">
+    <span class="ch-label">N° de Póliza</span>
+    <span class="ch-value" id="h-policy">—</span>
+  </div>
+  <div class="ch-sep"></div>
+  <div class="ch-field">
+    <span class="ch-label">Estado</span>
+    <span class="badge b-awaiting"><span class="badge-dot"></span>Pendiente HITL</span>
+  </div>
+</div>
+
+<!-- ── TWO-COLUMN LAYOUT ────────────────────────────────────────────── -->
+<div class="two-col">
+
+  <!-- ══ LEFT: EVIDENCIA DETERMINISTA ══════════════════════════════════ -->
+  <div id="col-left">
+    <div class="col-head col-head-left">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+      </svg>
+      Documentación y Evidencia Determinista
+    </div>
+    <div class="section-card">
+      <div class="section-title">Citas de Evidencia (extraídas del PDF por LIA)</div>
+      <div id="evidence-list" style="display:flex;flex-direction:column;gap:8px;padding:14px 16px;">
+        <div style="font-size:13px;color:var(--text-3);">Cargando evidencia…</div>
+      </div>
+    </div>
+
+    <div class="section-card first">
+      <div class="section-title">Datos del Análisis (deterministas)</div>
+      <table class="extracted-table">
+        <thead><tr><th>Campo</th><th>Valor</th></tr></thead>
+        <tbody>
+          <tr><td class="et-key">Asegurado</td><td class="et-val" id="d-claimant-name">—</td></tr>
+          <tr><td class="et-key">Correo</td><td class="et-val" id="d-claimant">—</td></tr>
+          <tr><td class="et-key">Póliza (id)</td><td class="et-val mono" id="d-policy" style="word-break:break-all">—</td></tr>
+          <tr><td class="et-key">Monto reportado</td><td class="et-val" id="d-amount">—</td></tr>
+          <tr><td class="et-key">Cobertura</td><td class="et-val" id="d-coverage">—</td></tr>
+          <tr><td class="et-key">Identidad (PDF vs cliente)</td><td class="et-val" id="d-identity">—</td></tr>
+          <tr><td class="et-key">SHA-256 del PDF</td><td class="et-val mono" id="d-sha" style="word-break:break-all;font-size:11px">—</td></tr>
+          <tr><td class="et-key">Pipeline ID</td><td class="et-val mono" id="d-pipeline" style="word-break:break-all;font-size:11px">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ══ RIGHT: PROPUESTA IA ════════════════════════════════════════════ -->
+  <div id="col-right">
+    <div class="col-head col-head-right">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="10"/>
+        <path d="M12 8v4l3 3"/>
+      </svg>
+      Propuesta de Triage de LIA (Analista)
+    </div>
+    <div class="section-card">
+      <!-- Hero numbers -->
+      <div class="proposal-hero">
+        <div class="proposal-payout" id="prop-payout">—</div>
+        <div class="proposal-badges">
+          <span class="badge b-sev-high" id="prop-severity"><span class="badge-dot" style="animation:none"></span>—</span>
+          <span class="badge" id="prop-coverage" style="display:none"></span>
+          <span class="badge" id="prop-identity" style="display:none"></span>
+          <span class="badge" id="prop-amount" style="display:none"></span>
+        </div>
+      </div>
+
+      <!-- AI Narrative — Consideración 4 -->
+      <div class="ai-narrative-wrapper">
+        <div class="ai-narrative-header">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          <span class="ai-narrative-label">Contenido Generado por LIA — Verificar con Evidencia</span>
+          <span class="ai-narrative-sub">↑ columna izquierda</span>
+        </div>
+        <div class="ai-narrative-body" id="prop-narrative">Cargando resumen de LIA…</div>
+      </div>
+    </div>
+
+    <!-- Auditor verdict (second-opinion agent, grounded by the deterministic checks) -->
+    <div class="section-card first" id="auditor-card" style="display:none">
+      <div class="section-title">Veredicto de LIA (Auditora) — segunda opinión</div>
+      <div class="section-inner">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+          <span class="badge" id="auditor-badge"></span>
+        </div>
+        <div id="auditor-reason" style="font-size:13px;line-height:1.55;color:#374151;"></div>
+        <div id="auditor-evidence" style="margin-top:8px;display:flex;flex-direction:column;gap:6px;"></div>
+      </div>
+    </div>
+
+    <!-- Agent Signature -->
+    <div class="section-card first">
+      <div class="section-title">Firma Criptográfica de LIA</div>
+      <div class="sig-section">
+        <div class="sig-label">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+          LIA Signature (SHA-256 HMAC)
+        </div>
+        <div class="sig-input-wrap">
+          <input class="sig-input" readonly id="sig-input"
+            value="5f4dcc3b5aa765d61d8327deb882cf99a8b3d9f7e2c1a0b4e6f8d2c5a7b9e3f1" />
+          <div class="sig-valid-chip">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+            Válida
+          </div>
+        </div>
+        <div class="sig-tooltip">Este HMAC-SHA256 firma la TriageProposal completa usando la clave de LIA. El backend valida que no haya sido modificada antes de procesar tu confirmación.</div>
+      </div>
+    </div>
+  </div>
+</div><!-- /two-col -->
+
+<!-- ── FIXED ACTION FOOTER ──────────────────────────────────────────── -->
+<div class="action-footer">
+  <div class="footer-info">
+    Revisando propuesta de <strong id="f-holder">—</strong>
+    &nbsp;·&nbsp; Claim <strong id="f-claim-id">—</strong>
+    &nbsp;·&nbsp; Esta acción quedará registrada en el log de auditoría.
+  </div>
+  <button class="btn-reject" onclick="openModal('reject')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    Rechazar Propuesta
+  </button>
+  <button class="btn-confirm" onclick="openModal('confirm')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+    Confirmar Triage
+  </button>
+</div>
+
+<!-- ── CONFIRM MODAL ────────────────────────────────────────────────── -->
+<div class="modal-backdrop" id="modal-confirm">
+  <div class="modal">
+    <div class="modal-header">
+      <div>
+        <div class="modal-icon confirm">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <div class="modal-title">Confirmar Propuesta de Triage</div>
+        <div class="modal-desc">¿Confirmas la propuesta de la IA para este claim? Esta acción es <strong>irreversible</strong> y generará un registro auditable firmado con tu credencial.</div>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div class="modal-label">Comentarios adicionales <span class="optional">(opcional)</span></div>
+      <textarea class="modal-textarea" id="confirm-comment" placeholder="Observaciones para el expediente…"></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal-cancel" onclick="closeModal('confirm')">Cancelar</button>
+      <button class="btn-modal-action confirm" id="btn-confirm-action" onclick="doConfirm()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+        Firmar y Confirmar
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ── REJECT MODAL ─────────────────────────────────────────────────── -->
+<div class="modal-backdrop" id="modal-reject">
+  <div class="modal">
+    <div class="modal-header">
+      <div>
+        <div class="modal-icon reject">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </div>
+        <div class="modal-title">Rechazar Propuesta de Triage</div>
+        <div class="modal-desc">El claim volverá al estado <strong>MANUAL_REVIEW</strong>. Indica el motivo para el registro de auditoría.</div>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div class="modal-label">Razón del rechazo <span style="color:var(--error);font-size:11px">* requerido</span></div>
+      <textarea class="modal-textarea" id="reject-reason" placeholder="Ej: El valor peritado no concuerda con las fotos del siniestro. Se requiere segunda inspección…"></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal-cancel" onclick="closeModal('reject')">Cancelar</button>
+      <button class="btn-modal-action reject" id="btn-reject-action" onclick="doReject()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        Rechazar y Enviar
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ── INJECTION DETAIL MODAL ───────────────────────────────────────── -->
+<div class="modal-backdrop" id="modal-injection">
+  <div class="modal">
+    <div class="modal-header">
+      <div>
+        <div class="modal-icon" style="background:var(--warning-dim)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="color:var(--warning)"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        </div>
+        <div class="modal-title" id="inj-modal-title">Log de Anomalías</div>
+        <div class="modal-desc" id="inj-modal-desc">Detalle de los eventos detectados durante el análisis del PDF.</div>
+      </div>
+    </div>
+    <div class="modal-body" id="inj-modal-body" style="padding-bottom:8px"><!-- populated by JS --></div>
+    <div class="modal-footer">
+      <button class="btn-modal-cancel" onclick="closeModal('injection')">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── SUCCESS OVERLAY ──────────────────────────────────────────────── -->
+<div class="success-overlay" id="success-overlay">
+  <div class="success-check">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+  </div>
+  <div class="success-title" id="success-title">Triage Confirmado</div>
+  <div class="success-sub" id="success-sub">La propuesta ha sido firmada y enviada al sistema.</div>
+  <div class="success-meta" id="success-meta">—</div>
+  <a href="monitoring.html" class="btn-success-back">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+    Volver al Monitoreo
+  </a>
+</div>
+
+<!-- ── PDF SIDE VIEWER (ceja + sidebar) ─────────────────────────────────── -->
+<button id="pdf-tab" onclick="togglePdf()" title="Ver el documento original">📄 Documento</button>
+<aside id="pdf-panel" aria-hidden="true">
+  <div class="pdf-panel-head">
+    <span>📄 Documento del siniestro</span>
+    <button onclick="closePdf()" title="Cerrar">✕</button>
+  </div>
+  <iframe id="pdf-frame" title="Documento del siniestro" style="display:none"></iframe>
+  <div id="pdf-empty">Cargando documento…</div>
+</aside>
+
+<script src="api.js"></script>
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   CLAIM DATA — hydrated from URL ?claim= + sessionStorage cache,
+   falls back to mock data when navigating directly
+═══════════════════════════════════════════════════════════════ */
+const CLAIM = {
+  id: '—', holder: '—',
+  policy: '—', type: '—', dateLoss: '—',
+  // The Redis proposal id used to audit/confirm. Null once the proposal TTL has
+  // passed (screen becomes read-only).
+  auditProposalId: null,
+  pipelineId: null,   // for the in-page PDF viewer
+  // No mock retry/injection feed: the backend does not surface these yet, so the
+  // risk banner stays hidden until there is real data to show.
+  retries: 0,
+  injectionFlags: [],
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   INIT
+═══════════════════════════════════════════════════════════════ */
+const _SEV_LABEL = { LOW: 'Severidad Baja', MEDIUM: 'Severidad Media', HIGH: 'Severidad Alta', CRITICAL: 'Severidad Crítica' };
+
+function _setText(id, val) { const el = document.getElementById(id); if (el) el.textContent = (val == null || val === '') ? '—' : val; }
+function _esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+function _money(v) { return v == null ? '$0' : '$' + Number(v).toLocaleString(); }
+
+window.addEventListener('DOMContentLoaded', async () => {
+  const urlParams  = new URLSearchParams(window.location.search);
+  const urlClaimId = urlParams.get('claim');
+
+  // Sync the claim id everywhere immediately (so the header isn't blank).
+  if (urlClaimId) {
+    CLAIM.id = urlClaimId;
+    _setText('h-claim-id', urlClaimId);
+    _setText('nav-claim-id', urlClaimId);
+    _setText('f-claim-id', urlClaimId);
+  }
+
+  // Risk banner is data-driven; with no real feed (retries=0, flags=[]) it stays hidden.
+  buildRiskBanner();
+
+  /* ── Backend status chip + session (need a token to fetch the proposal) ── */
+  await mountBackendStatus();
+  mountSessionBar();
+
+  const session = loadSession();
+  if (!session) {
+    buildLoginModal({
+      requiredRole: 'auditor',
+      onSuccess: ({ sub }) => {
+        mountSessionBar();
+        const av = document.querySelector('.nav-avatar');
+        if (av) av.textContent = sub.substring(0, 2).toUpperCase();
+        const nr = document.querySelector('.nav-right strong');
+        if (nr) nr.textContent = sub;
+        if (urlClaimId) hydrateProposal(urlClaimId);
+      }
+    });
+  } else {
+    const av = document.querySelector('.nav-avatar');
+    if (av) av.textContent = session.sub.substring(0, 2).toUpperCase();
+    const nr = document.querySelector('.nav-right strong');
+    if (nr) nr.textContent = session.sub;
+    if (urlClaimId) hydrateProposal(urlClaimId);
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════
+   HYDRATE — fetch the real proposal (triage + signed proposal) and
+   populate every field. Falls back to the monitoring cache (header
+   only) if the backend is unreachable.
+═══════════════════════════════════════════════════════════════ */
+async function hydrateProposal(claimId) {
+  let data = null;
+  try {
+    data = await getProposal(claimId);
+  } catch (err) {
+    const cached = loadProposalCache(claimId);
+    if (cached) {
+      CLAIM.holder = cached.holder || CLAIM.holder;
+      _setText('h-holder', cached.holder); _setText('f-holder', cached.holder);
+      _setText('h-type', cached.type); _setText('h-policy', cached.policy);
+      _setText('d-claimant', cached.holder);
+      if (cached.proposal && cached.proposal.payout) _setText('prop-payout', cached.proposal.payout);
+    }
+    return;
+  }
+
+  const triage   = data.triage || {};
+  const proposal = data.proposal || {};
+  const claimant = data.claimant_sub || '—';
+  const amount   = _money(triage.reported_damage_amount);
+  const sev      = (triage.severity || '').toUpperCase();
+
+  CLAIM.holder = claimant;
+  CLAIM.auditProposalId = data.audit_proposal_id || null;
+  CLAIM.pipelineId = data.pipeline_id || null;
+
+  // When loaded from the durable store after the proposal expired, it can no
+  // longer be signed/confirmed — make that explicit and lock the actions.
+  if (data.source === 'postgres' && !CLAIM.auditProposalId) {
+    const fi = document.querySelector('.footer-info');
+    if (fi) fi.innerHTML = 'Propuesta archivada (la ventana de revisión expiró) — solo lectura.';
+    document.querySelectorAll('.action-footer button').forEach(b => {
+      b.disabled = true; b.style.opacity = '.5'; b.style.pointerEvents = 'none';
+    });
+  }
+
+  // ── Header ──
+  _setText('h-holder', claimant);  _setText('f-holder', claimant);
+  _setText('h-type', 'Reclamación');
+  _setText('h-policy', triage.policy_id);
+
+  // ── Hero ──
+  _setText('prop-payout', amount);
+  const sevEl = document.getElementById('prop-severity');
+  if (sevEl) sevEl.innerHTML = '<span class="badge-dot" style="animation:none"></span>' + (_SEV_LABEL[sev] || ('Severidad ' + (sev || '—')));
+
+  // ── Narrative ──
+  _setText('prop-narrative', triage.summary || 'LIA no produjo un resumen.');
+
+  // ── Deterministic verifications: coverage + identity ──
+  const warnings = [];
+
+  const cov = data.coverage;
+  if (cov) {
+    const covEl = document.getElementById('prop-coverage');
+    if (covEl) {
+      covEl.style.cssText = cov.in_force
+        ? 'display:inline-flex;background:#D1FAE5;color:#065F46;'
+        : 'display:inline-flex;background:#FEE2E2;color:#991B1B;';
+      covEl.textContent = cov.in_force ? '✓ Cobertura vigente' : '⚠ Cobertura EXPIRADA';
+    }
+    _setText('d-coverage', cov.in_force ? 'Vigente' : ('No vigente — ' + (cov.reason || '')));
+    if (!cov.in_force) warnings.push(`Póliza no vigente: ${_esc(cov.reason || '')} `
+      + `(vigencia ${_esc(cov.effective_from || '?')} → ${_esc(cov.effective_to || '?')}).`);
+  }
+
+  const idn = data.identity;
+  if (idn) {
+    const idEl = document.getElementById('prop-identity');
+    if (idEl && idn.match !== null) {
+      idEl.style.cssText = idn.match
+        ? 'display:inline-flex;background:#D1FAE5;color:#065F46;'
+        : 'display:inline-flex;background:#FEE2E2;color:#991B1B;';
+      idEl.textContent = idn.match ? '✓ Identidad coincide' : '⚠ Identidad NO coincide';
+    }
+    _setText('d-identity', idn.match === null ? 'No verificable'
+      : (idn.match ? 'Coincide' : ('NO coincide — ' + (idn.reason || ''))));
+    if (idn.match === false) warnings.push(`Posible suplantación: ${_esc(idn.reason || '')}`);
+  }
+
+  const amt = data.amount;
+  if (amt) {
+    const amEl = document.getElementById('prop-amount');
+    if (amEl && amt.supported !== null) {
+      amEl.style.cssText = amt.supported
+        ? 'display:inline-flex;background:#D1FAE5;color:#065F46;'
+        : 'display:inline-flex;background:#FEE2E2;color:#991B1B;';
+      amEl.textContent = amt.supported ? '✓ Monto respaldado' : '⚠ Monto NO respaldado';
+    }
+    if (amt.supported === false) warnings.push(`Monto sin respaldo: ${_esc(amt.reason || '')}`);
+  }
+
+  // Single review-alert banner covering all deterministic red flags.
+  if (warnings.length) {
+    const banner = document.getElementById('risk-banner');
+    const items  = document.getElementById('risk-items');
+    if (banner && items) {
+      banner.classList.remove('hidden');
+      items.innerHTML = warnings.map(w => `<div class="risk-item">${w} Revisar antes de aprobar.</div>`).join('');
+    }
+  }
+
+  // ── Auditor verdict (auto-run after the analysis; grounded by the checks) ──
+  CLAIM.auditDecisionId = data.audit_decision_id || null;
+  const aud = data.auditor;
+  if (aud && aud.decision) {
+    const card = document.getElementById('auditor-card');
+    if (card) card.style.display = '';
+    const D = {
+      APPROVED:      ['#D1FAE5', '#065F46', '✓ APROBADO'],
+      REJECTED:      ['#FEE2E2', '#991B1B', '✕ RECHAZADO'],
+      MANUAL_REVIEW: ['#FEF3C7', '#92400E', '⚠ REVISIÓN MANUAL'],
+    }[aud.decision] || ['#EEE', '#333', aud.decision];
+    const badge = document.getElementById('auditor-badge');
+    if (badge) { badge.style.cssText = `display:inline-flex;background:${D[0]};color:${D[1]};`; badge.textContent = D[2]; }
+    _setText('auditor-reason', aud.reason || '');
+    const ev = document.getElementById('auditor-evidence');
+    if (ev) ev.innerHTML = (Array.isArray(aud.evidence) ? aud.evidence : []).map(q =>
+      `<div style="font-size:12.5px;padding:7px 10px;background:#F9FAFB;border-left:3px solid #9CA3AF;border-radius:6px;color:#374151;">“${_esc(q)}”</div>`).join('');
+  }
+
+  // ── Deterministic data ──
+  // This table shows FACTS only. If the amount is not backed by the document,
+  // do NOT display the AI's invented figure here — say so plainly.
+  _setText('d-claimant-name', (data.identity && data.identity.claimant_name) || '—');
+  _setText('d-claimant', claimant);
+  _setText('d-policy', triage.policy_id);
+  _setText('d-amount', (data.amount && data.amount.supported === false)
+    ? 'No especificado en el documento'
+    : amount);
+  _setText('d-sha', triage.pdf_sha256);
+  _setText('d-pipeline', data.pipeline_id);
+
+  // ── Evidence quotes ──
+  const ev = document.getElementById('evidence-list');
+  if (ev) {
+    const quotes = Array.isArray(triage.evidence_quotes) ? triage.evidence_quotes : [];
+    ev.innerHTML = quotes.length
+      ? quotes.map(q => `<div style="font-size:13px;line-height:1.5;padding:9px 12px;background:#F9FAFB;border-left:3px solid #5B5BD6;border-radius:6px;color:#111827;">“${_esc(q)}”</div>`).join('')
+      : '<div style="font-size:13px;color:#9CA3AF;">LIA no extrajo citas de evidencia del documento.</div>';
+  }
+
+  // ── Cryptographic signature (real HMAC) ──
+  const sig = document.getElementById('sig-input');
+  if (sig) sig.value = proposal.signature_hex || '—';
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RISK BANNER (Consideración 3)
+   Solo muestra reintentos y/o flags de inyección
+═══════════════════════════════════════════════════════════════ */
+function buildRiskBanner() {
+  const banner = document.getElementById('risk-banner');
+  const items  = document.getElementById('risk-items');
+  const hasRetries   = CLAIM.retries > 0;
+  const hasInjection = CLAIM.injectionFlags.length > 0;
+
+  if (!hasRetries && !hasInjection) {
+    banner.classList.add('hidden');
+    return;
+  }
+
+  if (hasRetries) {
+    const li = document.createElement('div');
+    li.className = 'risk-item';
+    li.textContent = `Este claim requirió ${CLAIM.retries} reintentos de auto-corrección en el backend antes de generar la propuesta.`;
+    items.appendChild(li);
+    document.getElementById('btn-risk-retries').style.display = 'inline-block';
+  }
+
+  if (hasInjection) {
+    const li = document.createElement('div');
+    li.className = 'risk-item';
+    li.textContent = `Se detectó ${CLAIM.injectionFlags.length} indicador(es) de posible inyección de prompt en el PDF. Revisar antes de aprobar.`;
+    items.appendChild(li);
+    document.getElementById('btn-risk-injection').style.display = 'inline-block';
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   INJECTION PANEL
+═══════════════════════════════════════════════════════════════ */
+function buildInjectionPanel() {
+  const panel = document.getElementById('injection-panel');
+  if (CLAIM.injectionFlags.length === 0) {
+    panel.innerHTML = `
+      <div class="injection-clear">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+        No se detectaron indicadores de inyección de prompt.
+      </div>`;
+    return;
+  }
+  const list = document.createElement('div');
+  list.className = 'injection-flags-list';
+  CLAIM.injectionFlags.forEach(f => {
+    const item = document.createElement('div');
+    item.className = 'injection-flag-item';
+    item.onclick = openInjectionModal;
+    item.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <div><strong>${f.ts}</strong> — ${f.msg} <span style="font-size:11px;color:var(--accent);cursor:pointer">Ver detalle →</span></div>`;
+    list.appendChild(item);
+  });
+  panel.appendChild(list);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PDF VIEWER SIMULATION
+═══════════════════════════════════════════════════════════════ */
+const PDF_PREVIEWS = {
+  'Reporte_Incendio_MG02.pdf': {
+    pages: 12, content: `<div class="pdf-line title">REPORTE DE SINIESTRO — INCENDIO RESIDENCIAL</div>
+<div class="pdf-line">Fecha del reporte: 12 de mayo de 2025</div><div class="pdf-line">Expediente: EXP-2025-MG-002</div>
+<div class="pdf-line"> </div><div class="pdf-line bold">1. DESCRIPCIÓN DEL SINIESTRO</div>
+<div class="pdf-line">El día 10 de mayo de 2025, aprox. a las 14:30 hrs, se registró</div>
+<div class="pdf-line">un incendio en la cocina del inmueble ubicado en Av. Las Rosas 245.</div>
+<div class="pdf-line"> </div><div class="pdf-line bold">2. DAÑOS: $45,200.00 MXN</div>`
+  },
+  'Fotos_Siniestro.pdf': {
+    pages: 6, content: `<div class="pdf-line title">REGISTRO FOTOGRÁFICO — SINIESTRO MG-002</div>
+<div class="pdf-line">Fotógrafo: Perito Ing. Roberto Sosa</div>
+<div class="pdf-line"> </div><div class="pdf-line">[Imagen 1] Vista general cocina — destrucción total</div>
+<div class="pdf-line">[Imagen 2] Panel eléctrico — evidencia de corto circuito</div>
+<div class="pdf-line">[Imagen 3] Comedor — daños por humo y agua</div>
+<div class="pdf-line"> </div><div class="pdf-line bold">Nota: Ver página 4 para zona con texto sospechoso detectado.</div>`
+  },
+  'Pericia_Danos.pdf': {
+    pages: 4, content: `<div class="pdf-line title">DICTAMEN PERICIAL DE DAÑOS</div>
+<div class="pdf-line">Perito: Arq. Carmen Villanueva | Cédula: 4872910</div>
+<div class="pdf-line"> </div><div class="pdf-line bold">ESTIMACIÓN DE DAÑOS</div>
+<div class="pdf-line">Cocina (destrucción total): .............. $28,000</div>
+<div class="pdf-line">Comedor (daños parciales):  .............. $12,000</div>
+<div class="pdf-line">Instalación eléctrica:      ..............  $7,200</div>
+<div class="pdf-line">                                          ————————</div>
+<div class="pdf-line bold">TOTAL BRUTO:                              $47,200</div>
+<div class="pdf-line">Deducible aplicado:                       ($2,000)</div>
+<div class="pdf-line bold">NETO A INDEMNIZAR:                        $45,200</div>`
+  },
+};
+
+function selectDoc(el, docName) {
+  document.querySelectorAll('.pdf-doc-item').forEach(d => d.classList.remove('active'));
+  el.classList.add('active');
+  const data = PDF_PREVIEWS[docName];
+  if (data) {
+    document.getElementById('pdf-name').textContent = docName;
+    document.querySelector('.pdf-preview-toolbar span:last-child').textContent = `Página 1 / ${data.pages}`;
+    document.getElementById('pdf-content').innerHTML = data.content;
+  }
+}
+
+function selectDocByName(keyword) {
+  const items = document.querySelectorAll('.pdf-doc-item');
+  items.forEach(el => {
+    const name = el.querySelector('.pdf-doc-name').textContent;
+    if (name.includes(keyword)) { selectDoc(el, name); el.scrollIntoView({behavior:'smooth',block:'nearest'}); }
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   MODALS
+═══════════════════════════════════════════════════════════════ */
+function openModal(type) {
+  document.getElementById('modal-' + type).classList.add('open');
+}
+function closeModal(type) {
+  document.getElementById('modal-' + type).classList.remove('open');
+}
+
+function openInjectionModal() {
+  const body = document.getElementById('inj-modal-body');
+  body.innerHTML = '';
+  CLAIM.injectionFlags.forEach(f => {
+    const entry = document.createElement('div');
+    entry.className = 'inj-log-entry';
+    entry.innerHTML = `
+      <div class="inj-ts">${f.ts}</div>
+      <div class="inj-msg">${f.msg}</div>
+      <div class="inj-snippet">${f.snippet}</div>`;
+    body.appendChild(entry);
+  });
+  if (CLAIM.retries > 0) {
+    const entry = document.createElement('div');
+    entry.className = 'inj-log-entry';
+    entry.innerHTML = `
+      <div class="inj-ts">18:21:33</div>
+      <div class="inj-msg">Backend auto-corrección intento 1: propuesta rechazada por validación determinista.</div>
+      <div class="inj-ts">18:21:47</div>
+      <div class="inj-msg">Backend auto-corrección intento 2: propuesta aceptada tras ajuste de severidad.</div>`;
+    body.appendChild(entry);
+  }
+  openModal('injection');
+}
+
+/* close modals on backdrop click */
+document.querySelectorAll('.modal-backdrop').forEach(bd => {
+  bd.addEventListener('click', e => { if (e.target === bd) bd.classList.remove('open'); });
+});
+
+/* ═══════════════════════════════════════════════════════════════
+   CONFIRM ACTION
+═══════════════════════════════════════════════════════════════ */
+async function doConfirm() {
+  const btn = document.getElementById('btn-confirm-action');
+  btn.innerHTML = '<span class="spinner"></span> Firmando…';
+  btn.disabled  = true;
+
+  const session = loadSession();
+  const payout  = document.getElementById('prop-payout').textContent;
+
+  try {
+    // The auditor already ran at analyze time — reuse its signed decision.
+    // Only re-audit if there is no pre-computed decision (auditor escalated/expired).
+    let decisionId = CLAIM.auditDecisionId;
+    if (!decisionId) {
+      const auditResult = await auditProposal(CLAIM.auditProposalId || CLAIM.id);
+      decisionId = auditResult.decision_id || auditResult.id || CLAIM.auditProposalId || CLAIM.id;
+    }
+
+    // Human confirms
+    await confirmDecision(decisionId, true);
+
+    closeModal('confirm');
+    const ts = new Date().toLocaleTimeString('es-MX', { hour12: false });
+    showSuccess(
+      'Triage Confirmado',
+      `La propuesta de ${payout} para ${CLAIM.holder} ha sido firmada y registrada.`,
+      `Claim ${CLAIM.id} · ${ts} · ${session?.sub || 'Auditor'}`
+    );
+
+  } catch (err) {
+    if (err.status === 0) {
+      // Backend unavailable — demo mode: simulate success
+      closeModal('confirm');
+      const ts = new Date().toLocaleTimeString('es-MX', { hour12: false });
+      showSuccess(
+        'Triage Confirmado (demo)',
+        `La propuesta de ${payout} para ${CLAIM.holder} ha sido registrada localmente.`,
+        `Claim ${CLAIM.id} · ${ts} · modo demo`
+      );
+    } else {
+      btn.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+        Firmar y Confirmar`;
+      btn.disabled = false;
+      // Show error inside modal
+      const errEl = document.querySelector('#modal-confirm .modal-desc');
+      if (errEl) { errEl.style.color = 'var(--error)'; errEl.textContent = err.detail || 'Error al confirmar. Intenta nuevamente.'; }
+    }
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   REJECT ACTION
+═══════════════════════════════════════════════════════════════ */
+async function doReject() {
+  const reasonEl = document.getElementById('reject-reason');
+  const reason   = reasonEl.value.trim();
+  if (!reason) {
+    reasonEl.style.borderColor = 'var(--error)';
+    reasonEl.style.boxShadow   = '0 0 0 3px var(--error-dim)';
+    reasonEl.focus();
+    return;
+  }
+
+  const btn     = document.getElementById('btn-reject-action');
+  btn.innerHTML = '<span class="spinner"></span> Enviando…';
+  btn.disabled  = true;
+
+  const session = loadSession();
+
+  try {
+    let decisionId = CLAIM.auditDecisionId;
+    if (!decisionId) {
+      const auditResult = await auditProposal(CLAIM.auditProposalId || CLAIM.id);
+      decisionId = auditResult.decision_id || auditResult.id || CLAIM.auditProposalId || CLAIM.id;
+    }
+    await confirmDecision(decisionId, false);
+
+    closeModal('reject');
+    showSuccess(
+      'Propuesta Rechazada',
+      `El claim ${CLAIM.id} ha sido enviado a revisión manual.`,
+      `Motivo registrado · ${new Date().toLocaleTimeString('es-MX', { hour12: false })} · ${session?.sub || 'Auditor'}`
+    );
+
+  } catch (err) {
+    if (err.status === 0) {
+      // Demo mode
+      closeModal('reject');
+      showSuccess(
+        'Propuesta Rechazada (demo)',
+        `El claim ${CLAIM.id} ha sido enviado a revisión manual.`,
+        `Motivo registrado localmente · ${new Date().toLocaleTimeString('es-MX', { hour12: false })}`
+      );
+    } else {
+      btn.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+        Rechazar y Enviar`;
+      btn.disabled = false;
+      const errEl = document.querySelector('#modal-reject .modal-desc');
+      if (errEl) { errEl.style.color = 'var(--error)'; errEl.textContent = err.detail || 'Error al rechazar. Intenta nuevamente.'; }
+    }
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SUCCESS OVERLAY
+═══════════════════════════════════════════════════════════════ */
+function showSuccess(title, sub, meta) {
+  document.getElementById('success-title').textContent = title;
+  document.getElementById('success-sub').textContent   = sub;
+  document.getElementById('success-meta').textContent  = meta;
+  document.getElementById('success-overlay').classList.add('show');
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   PDF SIDE VIEWER — slides out, content reflows to compare side by side
+═══════════════════════════════════════════════════════════════ */
+let _pdfLoaded = false;
+function togglePdf() {
+  if (document.body.classList.contains('pdf-open')) closePdf();
+  else openPdf();
+}
+function closePdf() {
+  document.body.classList.remove('pdf-open');
+  const tab = document.getElementById('pdf-tab');
+  if (tab) tab.textContent = '📄 Documento';
+}
+async function openPdf() {
+  document.body.classList.add('pdf-open');
+  const tab = document.getElementById('pdf-tab');
+  if (tab) tab.textContent = '✕ Cerrar';
+
+  if (_pdfLoaded) return;  // load the bytes only once
+  const frame = document.getElementById('pdf-frame');
+  const empty = document.getElementById('pdf-empty');
+  if (!CLAIM.pipelineId || CLAIM.pipelineId === '—') {
+    if (empty) empty.textContent = 'Documento no disponible para este claim.';
+    return;
+  }
+  try {
+    const url = await getPdfBlobUrl(CLAIM.pipelineId);
+    frame.src = url;
+    frame.style.display = 'block';
+    if (empty) empty.style.display = 'none';
+    _pdfLoaded = true;
+  } catch (e) {
+    if (empty) empty.textContent = 'No se pudo cargar el documento.';
+  }
+}
+</script>
+</body>
+</html>

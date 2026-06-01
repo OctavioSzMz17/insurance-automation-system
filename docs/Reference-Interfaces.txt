@@ -1,0 +1,461 @@
+1. INTERFAZ: Claim Document Upload & Initialization
+
+1.1. NOMBRE DE LA INTERFAZ Y OBJETIVO:
+
+    Nombre: Claim Document Upload & Initialization
+
+    Objetivo: Permitir al analista de seguros cargar de forma segura los documentos de la reclamación (PDFs principalmente), visualizar el estado de la carga y el inicio del procesamiento del request por parte del sistema InsureAI en tiempo real. Resuelve el problema de la ingesta inicial de datos y proporciona feedback inmediato sobre la disponibilidad del sistema.
+
+1.2. DISPOSICIÓN Y LAYOUT (UX):
+
+    Layout: Centrado y limpio, minimizando distracciones.
+
+        Área Central (<main>): Un componente tipo Dropzone de gran tamaño con indicaciones claras para arrastrar y soltar archivos, o un botón para seleccionar manualmente.
+
+        Panel Lateral Derecho Opcional (<aside>): Una vez iniciada la carga, este panel puede aparecer para mostrar el estado de los archivos individuales cargados y un Activity Log simplificado.
+
+        Barra de Navegación Superior (<nav>): Branding de InsureAI, perfil de usuario, y enlaces a otras secciones principales (ej. "Dashboard de Monitoreo").
+
+        Footer (<footer>): Información de versión, enlaces de soporte.
+
+1.3. INVENTARIO DE COMPONENTES Y DATA (UI):
+
+    Header:
+
+        Brand Logo (InsureAI)
+
+        User Profile Dropdown (Avatar, Name, Role)
+
+        Notifications Icon (Badge con contador de alertas)
+
+    Document Upload Dropzone Component:
+
+        Drag & Drop Area: Con icono de nube o flecha.
+
+        Text Label: "Arrastra tus documentos aquí o".
+
+        Button: "Explorar archivos" (Input type="file" con accept=".pdf").
+
+        Allowed File Types & Max Size Hint: "Solo PDFs (máx. 25MB por archivo)".
+
+    File List & Progress Panel (Dynamic): (Aparece tras seleccionar archivos)
+
+        File Card (per file):
+
+            File Name (.pdf)
+
+            File Size
+
+            Progress Bar (Linear): Indicando % de carga del archivo.
+
+            Status Badge (Loading, Uploaded, Error)
+
+            Action Icon (Remove): Para archivos pendientes de carga.
+
+        Button: "Iniciar Procesamiento" (Deshabilitado hasta que todos los archivos estén Uploaded).
+
+    Real-time Initialization Activity Log (Dynamic): (Aparece tras "Iniciar Procesamiento")
+
+        Title: "Estado de Inicialización del Request"
+
+        Event Log Component:
+
+            Timestamp
+
+            Event Type (e.g., Request ID Assigned, Document Parsing, AI Agent Spawning)
+
+            Message (e.g., "Request R-12345 initialized.", "Parsing document claim_001.pdf...", "Agent ID A-9876 spawned for claim R-12345.")
+
+            Status Icon (Pending, Success, Error)
+
+1.4. ESTADOS ASÍNCRONOS Y EVENTOS EN TIEMPO REAL:
+
+    SSE: 'pipeline.start':
+
+        La UI pasa del estado "Archivos cargados, esperando inicio" a "Procesando Request".
+
+        El Real-time Initialization Activity Log se activa y muestra el primer evento con el request_id asignado.
+
+        El Button "Iniciar Procesamiento" cambia a Disabled y su texto a "Procesando...".
+
+    SSE: 'document.parsed' (Custom Event):
+
+        Se añade una entrada al Activity Log indicando qué documento se ha parseado correctamente.
+
+    SSE: 'pipeline.timeout':
+
+        El Activity Log muestra un evento de advertencia/error con el mensaje "Tiempo de espera del pipeline excedido. Reintente o contacte a soporte."
+
+        Un Alert Component (Toast o Snackbar) aparece en la esquina superior derecha con el mismo mensaje.
+
+        El Button "Iniciar Procesamiento" podría volver a habilitarse como "Reintentar" o redirigir a una página de soporte.
+
+    SSE: 'pipeline.error':
+
+        El Activity Log muestra un evento de error detallado, incluyendo el código de error y un mensaje descriptivo.
+
+        Un Modal de error crítico puede aparecer, ofreciendo opciones como "Contactar Soporte" o "Volver al Inicio".
+
+    Chunks de 'ai_reasoning': No aplica directamente a esta interfaz inicial.
+
+1.5. INTERACCIONES CRÍTICAS DE SEGURIDAD (HITL):
+
+    No aplica directamente a esta interfaz. La seguridad aquí se centra en la carga de archivos (validación de tipo/tamaño) y la comunicación segura para iniciar el proceso (POST /upload con autenticación JWT).
+
+
+
+-----------------------------------------------------------------------------------------------------
+
+
+2. INTERFAZ: Live Claim Monitoring Dashboard
+
+2.1. NOMBRE DE LA INTERFAZ Y OBJETIVO:
+
+    Nombre: Live Claim Monitoring Dashboard
+
+    Objetivo: Proporcionar a los auditores y analistas una vista panorámica en tiempo real de todos los claims en procesamiento, con capacidad de profundizar en el "hilo de pensamiento" (ai_reasoning) de los agentes de IA para cada reclamación individual. Permite monitorear el progreso, identificar posibles cuellos de botella y detectar anomalías en la operación de la IA.
+
+2.2. DISPOSICIÓN Y LAYOUT (UX):
+
+    Layout: Dashboard con enfoque en la densidad de información y la interactividad.
+
+        Sidebar Izquierdo (<aside>): Filtros y búsqueda global de claims.
+
+        Área de Trabajo Principal (<main>):
+
+            Claim Status Overview (Top Section): Tarjetas de métricas agregadas (total claims, en progreso, awaiting input, errores).
+
+            Live Claim Table (Central): Tabla paginada/virtualizada de todas las reclamaciones activas, con columnas clave.
+
+            Detail Panel (Overlay/Drawer): Se activa al seleccionar una fila de la tabla, mostrando la telemetría y el ai_reasoning en tiempo real.
+
+2.3. INVENTARIO DE COMPONENTES Y DATA (UI):
+
+    Header: (Igual que la interfaz anterior)
+
+    Sidebar (Filters & Search):
+
+        Search Input (Claim ID, Policy Holder Name)
+
+        Dropdown Filter (Claim Status: All, Processing, Awaiting Input, Error, Confirmed)
+
+        Date Range Picker (Claim Creation Date)
+
+        Button: Apply Filters
+
+        Button: Clear Filters
+
+    Claim Status Overview Cards:
+
+        Card Component (para cada estado: Total, Processing, Awaiting Input, Error, Confirmed)
+
+            Metric Number
+
+            Status Label
+
+            Small Trend Graph (Optional, last 24h)
+
+    Live Claim Table:
+
+        Table Component:
+
+            Column: Claim ID (Link/Button para abrir Detail Panel)
+
+            Column: Policy Holder
+
+            Column: Claim Type
+
+            Column: Current Status (Badge: Processing, Awaiting Input, Error, Confirmed)
+
+            Column: AI Agent ID
+
+            Column: Last Activity Timestamp
+
+            Column: Predicted Payout (si disponible, de AI)
+
+            Column: Severity Score (de AI)
+
+            Column: Actions (Button: "View Details")
+
+        Pagination Component
+
+    Claim Detail Panel (Drawer/Overlay - Se abre al seleccionar una fila):
+
+        Header: Claim ID, Policy Holder Name, Current Status Badge.
+
+        Overview Tab:
+
+            Claim Details Card: (Información estática: Policy Number, Date of Loss, Uploaded Documents list)
+
+            AI Proposal Snapshot Card: (Si está en AWAITING_INPUT)
+
+                Predicted Payout
+
+                Severity Score
+
+                Key Reasoning Summary
+
+                Link to HITL Panel
+
+        Live AI Reasoning Tab:
+
+            Title: "AI Agent Reasoning Stream"
+
+            Streaming Code Block Component: Un área de texto no editable que se auto-desplaza hacia abajo.
+
+                Muestra el ai_reasoning en formato JSON o texto legible, con syntax highlighting si es posible.
+
+                Timestamp por cada chunk.
+
+            Progress Indicator (Spinner/Loader): Mientras el stream está activo.
+
+        Event Log Tab:
+
+            Event Log Component (Similar al de la primera interfaz, pero más completo):
+
+                Timestamp
+
+                Event Type (pipeline.start, document.parsed, agent.spawned, ai.reasoning.chunk, ai.triage.proposal, pipeline.timeout, pipeline.error)
+
+                Message/Payload Snippet
+
+                Source (e.g., Microservice name)
+
+2.4. ESTADOS ASÍNCRONOS Y EVENTOS EN TIEMPO REAL:
+
+    SSE: 'pipeline.start':
+
+        Una nueva fila aparece en la Live Claim Table con el Claim ID, Status: Processing y el Last Activity Timestamp.
+
+    SSE: 'ai_reasoning' (chunks):
+
+        Cuando el Detail Panel de un Claim ID específico está abierto en la Live AI Reasoning Tab, cada chunk de ai_reasoning se apende al Streaming Code Block.
+
+        El Last Activity Timestamp en la tabla se actualiza.
+
+    SSE: 'ai.triage.proposal' (Custom Event):
+
+        El Status Badge de la fila del Claim ID en la tabla cambia a Awaiting Input.
+
+        El Detail Panel actualiza la AI Proposal Snapshot Card con la TriageProposal y el agent_signature.
+
+        Se añade una entrada al Event Log Tab.
+
+    SSE: 'pipeline.timeout' / SSE: 'pipeline.error':
+
+        El Status Badge de la fila del Claim ID en la tabla cambia a Error o Timeout.
+
+        Se añade una entrada de error al Event Log Tab del Detail Panel.
+
+        Un Alert Component (Toast/Snackbar) puede aparecer indicando que un Claim ID específico ha tenido un error.
+
+    SSE: 'claim.confirmed' (Custom Event):
+
+        El Status Badge de la fila del Claim ID en la tabla cambia a Confirmed.
+
+        La fila puede desaparecer si el filtro actual no incluye "Confirmed" o moverse al final de la lista.
+
+2.5. INTERACCIONES CRÍTICAS DE SEGURIDAD (HITL):
+
+    Esta interfaz sirve de puente. Si un claim está en estado Awaiting Input, la AI Proposal Snapshot Card en el Detail Panel tendrá un botón visible Review for Approval que dirige a la Human-in-the-Loop Approval Panel (la tercera interfaz).
+
+---------------------------------------------------------------------------------------------------------
+
+
+3. INTERFAZ: Human-in-the-Loop Approval Panel
+
+3.1. NOMBRE DE LA INTERFAZ Y OBJETIVO:
+
+    Nombre: Human-in-the-Loop Approval Panel
+
+    Objetivo: Permitir al ajustador o analista de seguros revisar, validar y confirmar o rechazar la TriageProposal generada por el agente de IA para un claim específico. Esta interfaz es crítica para la seguridad y la gobernanza, requiriendo confirmación humana explícita, visualizando la firma del agente y alertando sobre riesgos o anomalías. Resuelve el problema de la "liberación" de los claims congelados en AWAITING_INPUT.
+
+3.2. DISPOSICIÓN Y LAYOUT (UX):
+
+    Layout: Orientado a la revisión, con dos columnas principales para comparación y un área de acción clara.
+
+        Barra de Navegación Superior (<nav>): Simplificada, solo branding y Claim ID.
+
+        Área de Contenido Principal (<main>):
+
+            Claim Header (Top): Información clave del claim.
+
+            Left Column (Evidence Column): Datos deterministas y documentales (PDFs, detalles de la póliza).
+
+            Right Column (AI Proposal Column): La TriageProposal de la IA, su razonamiento, y métricas de confianza.
+
+            Action Footer (Bottom): Botones de confirmación/rechazo y alertas de seguridad.
+
+3.3. INVENTARIO DE COMPONENTES Y DATA (UI):
+
+    Header:
+
+        Claim ID
+
+        Policy Holder Name
+
+        Status Badge (Awaiting Input)
+
+        Back Button (Link to Live Claim Monitoring Dashboard)
+
+    Claim Overview Card:
+
+        Policy Number
+
+        Date of Loss
+
+        Claim Type
+
+        Adjuster Assigned (Current User)
+
+    Left Column: Deterministic Evidence Panel:
+
+        Title: "Documentación y Evidencia Determinista"
+
+        Document Viewer Component:
+
+            Miniaturas o lista de documentos cargados.
+
+            PDF Viewer (Embedded): Permite visualizar los PDFs originales cargados.
+
+            Annotation/Highlighting Tools (Optional): Si se requiere para el ajustador.
+
+        Extracted Data Table: (Datos estructurados extraídos por la IA de los documentos)
+
+            Key Value Pairs (ej. Damage Type: Front Bumper, Policy Coverage: Full, Deductible: $500).
+
+            Source Document Link para cada punto de dato.
+
+    Right Column: AI Triage Proposal Panel:
+
+        Title: "Propuesta de Triage del Agente de IA"
+
+        TriageProposal Card:
+
+            AI Predicted Payout Amount (Large, bold text)
+
+            AI Severity Score (Badge: Low, Medium, High)
+
+            Confidence Score (Gauge/Bar)
+
+            Key Recommendation Summary (Truncated text, expand to view full)
+
+        AI Reasoning Narrative Block:
+
+            Title: "Narrativa del Agente de IA"
+
+            Read-only Text Area: Presenta la narrativa probabilística del modelo de lenguaje, explicando el porqué de la propuesta.
+
+        Evidence Matrix Comparison (Table): (Cruza evidencia vs narrativa)
+
+            Column: Deterministic Fact (ej. "Date of Accident: 2023-10-26")
+
+            Column: AI Narrative Statement (ej. "AI infiere accidente ocurrió en esa fecha.")
+
+            Column: Match Status (Icon: Checkmark, Warning, X)
+
+            Column: Confidence Level (AI)
+
+        Prompt Injection Detection Flags (Dynamic):
+
+            Warning Badge: "Anomalía de Prompt Detectada".
+
+            Details Link: Abre un Modal con el log de la anomalía, el prompt original y la versión alterada si aplica.
+
+3.4. ESTADOS ASÍNCRONOS Y EVENTOS EN TIEMPO REAL:
+
+    SSE: 'pipeline.start' / 'ai_reasoning': No aplica directamente, esta interfaz es para estados congelados.
+
+    SSE: 'pipeline.timeout' / SSE: 'pipeline.error': Si esta interfaz está abierta y el claim subyacente cambia de estado a ERROR o TIMEOUT por alguna razón (ej. otra parte del sistema lo marcó), la interfaz debe mostrar un Alert Modal y deshabilitar los botones de acción.
+
+    SSE: 'agent_signature.validation_error' (Custom Event): Si la firma del agente es invalidada por el backend tras el envío, la interfaz debe mostrar un Error Modal y desactivar las acciones.
+
+3.5. INTERACCIONES CRÍTICAS DE SEGURIDAD (HITL):
+
+    Agent Signature Display:
+
+        Agent Signature Card:
+
+            Label: "Agent Cryptographic Signature (SHA-256)"
+
+            Read-only Input Field: Muestra el agent_signature (hash criptográfico de la TriageProposal).
+
+            Tooltip: Explica qué es y su propósito de integridad.
+
+    Risk Alert (Conditional):
+
+        Warning Banner (Top of page, red/orange): Aparece si "la severidad del LLM no cuadra con el monto" (if LLM_Severity_Score != Calculated_Risk_Based_on_Payout).
+
+        Text: "ALERTA DE RIESGO: La severidad de la IA [X] no concuerda con el monto de la propuesta [Y]. Revisión adicional recomendada."
+
+        Icon: Warning Icon.
+
+    Prompt Injection Flags: Ya descrito en la sección 3.3.
+
+    Confirmation / Rejection Buttons:
+
+        Button: "Confirmar Triage" (Primary Action):
+
+            Al hacer clic, abre un Confirmation Modal.
+
+            Confirmation Modal:
+
+                Title: "Confirmar Propuesta de Triage"
+
+                Text: "¿Estás seguro de que deseas confirmar esta propuesta de la IA? Esta acción es irreversible y generará un registro auditable."
+
+                Input Field (Optional): Para añadir comentarios adicionales.
+
+                Button: "Firmar y Confirmar":
+
+                    Al hacer clic, el sistema genera un JWT en el frontend, lo firma con las credenciales del usuario actual, y dispara el POST /confirm endpoint con el claim_id, TriageProposal_hash, user_signature_JWT y agent_signature.
+
+                    Muestra un Loading Spinner mientras se espera la respuesta del backend.
+
+                Button: "Cancelar"
+
+        Button: "Rechazar Propuesta" (Secondary Action):
+
+            Al hacer clic, abre un Rejection Modal.
+
+            Rejection Modal:
+
+                Title: "Rechazar Propuesta de Triage"
+
+                Text: "Por favor, indica la razón del rechazo. Esto enviará el claim de vuelta al estado 'Rechazado' para revisión manual."
+
+                Textarea: Campo obligatorio para la "Razón del Rechazo".
+
+                Button: "Rechazar y Enviar": Envía la razón y cambia el estado del claim.
+
+                Button: "Cancelar"
+
+----------------------------------------------------------------------------------------
+
+
+⚠️ Lo que se debe Corregir o Endurecer (Puntos Débiles y Ajustes)
+1. Interfaz 1: El peligro de la carga ciega
+
+    El problema: El diseño propone un registro de actividad en tiempo real (Activity Log) que solo muestra mensajes genéricos como "Parsing document...".
+
+    La corrección: En el segundo en que ocurre el evento pipeline.start y el orquestador valida el inicio, la UI debe renderizar e imprimir de inmediato en pantalla el Request ID (Trace UUID) asignado de forma prominente, con un botón rápido para "Copiar al portapapeles". Si la conexión SSE se cae o da timeout, el analista necesita ese ID exacto para poder levantar un reporte de soporte o rastrear qué pasó con el archivo en los logs internos.
+
+2. Interfaz 2: Monitoreo de Conexiones concurrentes (Límite de la Categoría 3)
+
+    El problema: Recuerda que en el Master Patch Parte 4 limitamos el backend a un máximo de 3 conexiones SSE simultáneas por usuario para evitar la denegación de servicio. Si la tabla de monitoreo en vivo intenta abrir canales SSE automáticos en background para cada fila visible, va a romper el límite del backend inmediatamente (HTTP 429).
+
+    La corrección: El streaming de ai_reasoning debe ser estrictamente bajo demanda. El spinner y la conexión EventSource solo deben inicializarse en el instante exacto en que el usuario hace clic en la pestaña "Live AI Reasoning" dentro del panel de detalle, y debe cerrarse explícitamente (close()) si el usuario cierra el Drawer o cambia de pestaña.
+
+3. Interfaz 3: El banner de alerta de riesgo (Monto vs Severidad)
+
+    El problema: El diseño dice "Warning Banner... aparece si la severidad del LLM no cuadra con el monto".
+
+    La corrección: Tras aplicar el Master Patch Parte 3, esto ya no es una advertencia; es un bloqueo duro. El validador determinista del backend (check_severity_matches_amount) batea la propuesta antes de guardarla. Por lo tanto, si el ajustador humano llega a ver un reclamo en el panel HITL, es porque la severidad obligatoriamente ya coincide con el monto en los rangos matemáticos.
+
+    Lo que sí debe mostrar este banner de riesgo no es una falta de coincidencia, sino si el siniestro requirió múltiples reintentos de auto-corrección en el backend o si el texto del PDF contenía los marcadores que activaron las banderas de inyección de prompt (Prompt Injection Detection Flags).
+
+4. Interfaz 3: Tratamiento de Texto No Confiable (Mitigación Visual de Inyecciones)
+
+    El problema: En la sección 3.3 se menciona un "Read-only Text Area" para presentar la narrativa probabilística del modelo.
+
+    La corrección UI/UX: Para evitar que el cerebro humano sea víctima de ingeniería social por un texto inyectado en el PDF (que la IA convenientemente resumió de forma persuasiva), el bloque de texto de la narrativa de la IA debe contar con un estilo visual claramente diferenciado. Se debe usar un contenedor con un fondo de advertencia texturizado o bordes amarillos/naranjas con la etiqueta explícita: CONTENIDO GENERADO POR IA - VERIFICAR CON LA EVIDENCIA IZQUIERDA. La interfaz debe obligar visualmente al usuario a realizar un escaneo en paralelo ("Columna Izquierda Determinista" vs "Columna Derecha Probabilística").
