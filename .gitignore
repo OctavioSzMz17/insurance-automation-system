@@ -1,109 +1,38 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-# Python venv `lib/` rule above must not swallow UI source folders.
-!ui/src/lib/
-!ui/src/lib/**
-
-# Claude Code session state — local-only
-.claude/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Virtual environments
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
 venv/
 env/
-ENV/
-.venv
 
-# IDE
-.vscode/
+# OS / editor
+.DS_Store
+Thumbs.db
 .idea/
-*.swp
-*.swo
-*~
-.DS_Store
-*.sublime-project
-*.sublime-workspace
+.vscode/
 
-# Environment files
-.env
-.env.local
-.env.*.local
+# Build artifacts
+dist/
+build/
+*.egg
 
-# Testing & coverage
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.mypy_cache/
-.dmypy.json
-dmypy.json
+# Local Claude tooling
+.claude/local/
 
-# Database
-*.db
-*.sqlite
-*.sqlite3
-postgres_data/
-
-# Logs
-*.log
-logs/
-
-# Node (if any frontend)
-node_modules/
-npm-debug.log
-yarn-error.log
-
-# Docker — keep .dockerignore tracked; only ignore per-service overrides
-# (none committed today; the rule was here from the initial scaffold).
-
-# Kubernetes
-kube.local.yaml
-
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-
-# IDE Python
-.python-version
-
-# Alembic
-alembic/versions/*.pyc
-
-# Project documents (local only)
-docs/
-
-# Temp files
-tmp/
-temp/
-*.tmp
-
-# PDF processing temp files
-pdf_temp/
-ocr_cache/
-
-# Sensitive files
-secrets.local.yaml
-.credentials
+# Runtime user data — uploaded claim PDFs / photos (never commit)
+data/uploads/
+!data/uploads/.gitkeep

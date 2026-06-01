@@ -1,0 +1,7 @@
+FROM insurance-mcp-base:latest
+
+COPY --chmod=755 infra/docker/entrypoint_mcp.sh /entrypoint_mcp.sh
+
+EXPOSE 8003
+ENV MCP_APP=users.server:app MCP_PORT=8003
+ENTRYPOINT ["/entrypoint_mcp.sh"]

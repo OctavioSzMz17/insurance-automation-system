@@ -1,257 +1,111 @@
-"""FastAPI Orchestrator — Phase C C1.1
+"""FastAPI orchestrator entrypoint (Phase 4: JWT auth + public HTTP API).
 
-Top-level FastAPI app. Boots the AgentRouter once at startup (lifespan
-hook) and reuses it for every request. Mounts health + claims routers.
-
-Run:
-    uvicorn app:app --app-dir ai-orchestrator --reload
-    # or
-    py scripts/run_api.py
-
-Endpoints exposed by C1.1:
-    GET  /health           — liveness
-    GET  /ready            — readiness (LLM / DB config checks)
-    POST /claims/submit    — full agent pipeline
-    GET  /docs             — auto-generated OpenAPI
-
-NOT yet:
-    - Auth (C1.4)
-    - CORS (added here but defaults to a permissive setting in development)
-    - GET /claims/{id} (C1.2)
-    - POST /claims/{id}/approve (C1.3)
-
-Rules applied:
-    Rule 7  — Will add JWT + RBAC in C1.4
-    Rule 9  — Structured logging via stdlib logger
-    Rule 11 — Type hints everywhere
+Endpoints (all require Bearer JWT unless noted):
+  GET  /health             open — liveness probe
+  GET  /ready              open — readiness probe
+  POST /auth/token         open in dev, 404 in prod — issue test JWT
+  POST /auth/logout        JWT — revoke caller's token
+  POST /auth/revoke-user/{sub}  JWT (admin) — revoke all tokens for user
+  POST /analyze            JWT (analyst+)
+  POST /audit              JWT (auditor+)
+  GET  /pending            JWT (analyst+)
+  POST /confirm            JWT (auditor+)
 """
-
 from __future__ import annotations
 
-import logging
-import sys
-from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import AsyncIterator
+import asyncio
+import os
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-_HERE         = Path(__file__).resolve().parent
-_PROJECT_ROOT = _HERE.parent
-sys.path.insert(0, str(_PROJECT_ROOT))
-sys.path.insert(0, str(_HERE))
+from agents.analyst import Analyst
+from agents.auditor import Auditor
+from agents.mutation_handler import MutationHandler
+from auth.stream_tickets import StreamTicketStore
+from config import get_settings
+from core.hitl import HITLStore
+from core.logging_bridge import configure as configure_logging
+from core.logging_bridge import get_logger
+from core.mcp_client import MCPClientPool
+from core.models import get_model
+from core.redis_bridge import dispose_redis, get_redis
+from middleware.rate_limit import RateLimitMiddleware
+from middleware.trace_id import TraceIdMiddleware
+from routes.agent_router import router as agent_router
+from routes.auth import router as auth_router
+from routes.health import router as health_router
+from routes.sse import router as sse_router
+from routes.upload import router as upload_router
+from workers.hitl_reaper import run_reaper
 
-from config import get_settings                       # noqa: E402
-from routes.agent_router import AgentRouter           # noqa: E402
-from routes.mcp_router   import MCPRouter             # noqa: E402
-from routes import health as health_routes            # noqa: E402
-from routes import claims as claims_routes            # noqa: E402
-from routes import auth   as auth_routes              # noqa: E402
-from routes import users  as users_routes             # noqa: E402
+_logger = get_logger(__name__)
 
-from middleware.trace_id        import TraceIdMiddleware     # noqa: E402
-from observability.logging      import configure_logging     # noqa: E402
-from observability.event_bus    import get_event_bus         # noqa: E402
-# Master Patch Part 2 — bounded, thread-safe request-owner registry.
-from auth.request_owners        import RequestOwnerRegistry  # noqa: E402
-# Master Patch Part 4 — bounded, per-sub-quota stream-ticket store.
-from auth.stream_tickets        import StreamTicketStore     # noqa: E402
-# Fix A — optional Redis client for shared state across replicas.
-from auth.redis_client          import create_redis_client   # noqa: E402
-# Fix D — inject Redis into approval validator at startup.
-from validation                 import configure_approval_redis  # noqa: E402
-
-
-# ── Logging — D3.1 ──────────────────────────────────────────────
-# Single entry point owns level / format / trace filter. The format is
-# selectable at runtime via LOG_FORMAT=text|json so devs get readable
-# logs and prod / aggregators get structured JSON.
-_settings = get_settings()
-configure_logging(
-    level=_settings.log_level,
-    log_format=("json" if _settings.log_format.lower() == "json" else "text"),
-)
-logger = logging.getLogger("orchestrator")
+# ── CORS config read from env at import time (safe — no validators run) ───────
+_cors_origins = [
+    o.strip()
+    for o in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8000").split(",")
+    if o.strip()
+]
 
 
-# ── Lifespan: build the singleton AgentRouter once at startup ─────
+# ── Lifespan ──────────────────────────────────────────────────────────────────
+
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup / shutdown hooks for the FastAPI app."""
+async def lifespan(app: FastAPI):
     settings = get_settings()
-    logger.info(
-        "Orchestrator starting | env=%s provider=%s model=%s",
-        settings.environment, settings.llm_provider, settings.model_name,
+    configure_logging(settings.log_level)
+    settings.cross_validate()
+
+    pool = MCPClientPool(settings)
+    await pool.start()
+    llm = get_model(settings.analyst_model_tier)
+    redis = await get_redis(settings.redis_url)
+    hitl = HITLStore(redis, default_ttl=settings.analyst_proposal_ttl_seconds)
+
+    app.state.settings = settings
+    app.state.pool = pool
+    app.state.analyst = Analyst(runtime=settings, pool=pool, llm=llm)
+    app.state.auditor = Auditor(runtime=settings, pool=pool, llm=llm)
+    app.state.mutation = MutationHandler(runtime=settings, pool=pool)
+    app.state.hitl = hitl
+    app.state.redis = redis
+    app.state.ticket_store = StreamTicketStore(redis_client=redis)
+
+    reaper_task = asyncio.create_task(run_reaper(redis, pool))
+
+    _logger.info(
+        "orchestrator boot",
+        extra={"event": "orchestrator.boot", "tier": settings.analyst_model_tier, "model": llm.model},
     )
-
-    # Fix #65 — refuse to start in non-dev environments with the default
-    # or a short JWT secret. An attacker who reads the source can forge
-    # admin tokens if this is not enforced.
-    _PROD_ENVS = {"production", "prod", "staging"}
-    _JWT_DEFAULT = "dev-only-replace-me"
-    if settings.environment.lower() in _PROD_ENVS:
-        if (
-            settings.jwt_secret_key == _JWT_DEFAULT
-            or len(settings.jwt_secret_key) < 32
-        ):
-            raise RuntimeError(
-                f"JWT_SECRET_KEY is unset or uses the default placeholder "
-                f"(env={settings.environment}). Set a strong secret of at "
-                f"least 32 characters in .env before deploying."
-            )
-    elif settings.jwt_secret_key == _JWT_DEFAULT:
-        logger.warning(
-            "JWT_SECRET_KEY is using the dev placeholder — "
-            "replace before deploying to any shared environment"
-        )
-
-    # Fix #73 — refuse to start in production/staging with /tmp upload dir.
-    # Files in /tmp are cleared on pod restart; a PVC mount is required.
-    _upload_dir = settings.claim_upload_dir or "/tmp/claim-uploads"
-    if settings.environment.lower() in _PROD_ENVS:
-        if not settings.claim_upload_dir or "/tmp" in _upload_dir:
-            raise RuntimeError(
-                f"CLAIM_UPLOAD_DIR is '{_upload_dir}' — /tmp is not persistent "
-                f"across pod restarts. Mount a PVC and set CLAIM_UPLOAD_DIR in .env."
-            )
-    elif not settings.claim_upload_dir or "/tmp" in _upload_dir:
-        logger.warning(
-            "CLAIM_UPLOAD_DIR uses /tmp ('%s') — files will be lost on restart. "
-            "Set CLAIM_UPLOAD_DIR to a persistent path for production use.",
-            _upload_dir,
-        )
-
-    # Fix A — initialise Redis client (None when REDIS_URL is not set).
-    redis_client = await create_redis_client(settings.redis_url)
-    app.state.redis = redis_client
-    if redis_client is not None:
-        logger.info("Redis connected | url=<redacted> backend=shared-state")
-    else:
-        logger.warning(
-            "REDIS_URL not set — ownership/ticket stores running in-memory "
-            "(single-replica only; set REDIS_URL for multi-replica deployments)"
-        )
-
     try:
-        app.state.mcp_router = MCPRouter()
-        logger.info("MCPRouter ready")
-    except Exception as e:
-        logger.error("MCPRouter failed to initialise: %s", e, exc_info=True)
-        app.state.mcp_router = None
-
-    try:
-        app.state.agent_router = AgentRouter(max_attempts=settings.max_retry_attempts)
-        logger.info("AgentRouter ready")
-    except Exception as e:
-        logger.error("AgentRouter failed to initialise: %s", e, exc_info=True)
-        app.state.agent_router = None
-
-    # E1.1 — start the event-bus GC so orphaned per-request queues
-    # don't pile up if a publisher never gets a subscriber.
-    # Fix #78 — wire Redis Pub/Sub backend for multi-replica SSE support.
-    bus = get_event_bus()
-    bus.set_redis(redis_client)
-    bus.start_gc()
-    app.state.event_bus = bus
-    logger.info(
-        "EventBus ready | gc=on redis=%s",
-        "yes" if redis_client is not None else "no",
-    )
-
-    # Master Patch Part 4 — bounded, thread-safe stream-ticket store.
-    # Eradicates the plain dict that allowed unbounded growth + O(N)
-    # sweep amplification. Per-sub quota blocks single-credential
-    # mint floods.
-    # Fix D — wire Redis into the approval validator module-level client.
-    configure_approval_redis(redis_client)
-    logger.info("ApprovalValidators Redis configured")
-
-    # Fix A — pass Redis client so stores are shared across replicas.
-    app.state.stream_tickets = StreamTicketStore(
-        maxsize=10_000,
-        ttl_seconds=30,
-        max_per_sub=20,
-        redis_client=redis_client,
-    )
-    logger.info("StreamTicketStore ready (maxsize=10000 ttl=30s per_sub=20)")
-
-    # Master Patch Part 2 + Fix A — ownership registry backed by Redis
-    # when available so cross-replica tenant isolation is enforced.
-    app.state.request_owners = RequestOwnerRegistry(
-        maxsize=10_000,
-        ttl_seconds=3600,
-        redis_client=redis_client,
-    )
-    logger.info("RequestOwnerRegistry ready (maxsize=10000 ttl=3600s)")
-
-    yield
-
-    bus.stop_gc()
-
-    # Fix A — close Redis connection cleanly on shutdown.
-    if redis_client is not None:
-        await redis_client.aclose()
-        logger.info("Redis connection closed")
-
-    logger.info("Orchestrator shutting down")
-    app.state.agent_router = None
-    app.state.mcp_router = None
+        yield
+    finally:
+        reaper_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await reaper_task
+        await pool.stop()
+        await dispose_redis()
 
 
-# ── App ───────────────────────────────────────────────────────────
+# ── App ───────────────────────────────────────────────────────────────────────
 
-# Fix #82 — disable the auto-generated /docs and /openapi.json endpoints in
-# production / staging so internal API structure is not publicly discoverable.
-# In development the docs remain available (fast feedback loop).
-_PROD_ENVS_DOCS = {"production", "prod", "staging"}
-_docs_url    = None if _settings.environment.lower() in _PROD_ENVS_DOCS else "/docs"
-_redoc_url   = None if _settings.environment.lower() in _PROD_ENVS_DOCS else "/redoc"
-_openapi_url = None if _settings.environment.lower() in _PROD_ENVS_DOCS else "/openapi.json"
+app = FastAPI(title="insurance-orchestrator", version="0.4.0", lifespan=lifespan)
 
-app = FastAPI(
-    title="InsureAI Orchestrator",
-    description=(
-        "Insurance claim triage API — runs PDF claims through the "
-        "analyst + auditor agent pipeline and returns structured decisions."
-    ),
-    version="0.1.0",
-    lifespan=lifespan,
-    docs_url=_docs_url,
-    redoc_url=_redoc_url,
-    openapi_url=_openapi_url,
-)
-
-# D2.4 — bind a trace_id to every request as the first thing we do.
-# IMPORTANT: register BEFORE CORS so the contextvar is set even on
-# OPTIONS preflight requests (helps when correlating CORS bugs).
-app.add_middleware(TraceIdMiddleware)
-
-# Fix #66 — CORS origins now come from CORS_ALLOWED_ORIGINS in .env.
-# Wildcard "*" is never used; falls back to localhost only when the var
-# is unset (safe for local dev, refuses cross-origin in production).
-_cors_settings = get_settings()
-# Fix #88 — restrict allow_methods to the HTTP verbs actually used by the
-# API (GET and POST only). PUT/PATCH/DELETE were present but no endpoint
-# implements them; advertising them in CORS widens the attack surface and
-# confuses browser security policies.  OPTIONS is required for preflight.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_settings.cors_origins_list,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Trace-Id"],
-    expose_headers=["X-Trace-Id"],
+    allow_headers=["*"],
 )
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(TraceIdMiddleware)
 
-# Mount routers
-app.include_router(health_routes.router)
-app.include_router(auth_routes.router)
-app.include_router(claims_routes.router)
-app.include_router(users_routes.router)
-
-
-# Convenience root
-@app.get("/", include_in_schema=False)
-async def root() -> dict[str, str]:
-    return {"service": "insureai-orchestrator", "docs": "/docs"}
+app.include_router(health_router)
+app.include_router(auth_router)
+app.include_router(sse_router)
+app.include_router(upload_router)
+app.include_router(agent_router)

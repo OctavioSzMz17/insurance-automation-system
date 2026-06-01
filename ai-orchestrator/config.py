@@ -1,139 +1,164 @@
-"""Typed configuration for the orchestrator (Phase C).
-
-Reads .env via pydantic-settings. Provides one Settings singleton that
-the rest of the orchestrator imports. Never re-read env vars directly
-from code outside this module (Rule 8).
-"""
-
+"""Orchestrator settings. Fail-hard at startup on weak/missing secrets (Rule 8)."""
 from __future__ import annotations
 
 from functools import lru_cache
-from pathlib import Path
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+class OrchestratorSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-class Settings(BaseSettings):
-    """All orchestrator configuration in one place."""
+    environment: str = Field(default="development")
+    log_level: str = Field(default="INFO")
 
-    model_config = SettingsConfigDict(
-        env_file=_PROJECT_ROOT / ".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",
-    )
+    # ── LLM tier registry ────────────────────────────────────────────────────
+    low_model: str = Field(default="")
+    medium_model: str = Field(default="")
+    high_model: str = Field(default="")
+    analyst_model_tier: str = Field(default="medium")
 
-    # ── API ────────────────────────────────────────────────────────
-    api_host: str = Field(default="0.0.0.0",  alias="API_HOST")
-    api_port: int = Field(default=8000,        alias="API_PORT")
-    environment: str = Field(default="development", alias="ENVIRONMENT")
-    log_level: str = Field(default="INFO",     alias="LOG_LEVEL")
+    anthropic_api_key: str = Field(default="")
+    openai_api_key: str = Field(default="")
+    gemini_api_key: str = Field(default="")
+    local_base_url: str = Field(default="")
+    local_api_key: str = Field(default="")
 
-    # D3.1 — log formatter selection.
-    # "text" → human-readable pipe-separated format (dev default).
-    # "json" → one JSON object per line (production / aggregators).
-    log_format: str = Field(default="text",    alias="LOG_FORMAT")
+    # ── MCP endpoints ────────────────────────────────────────────────────────
+    mcp_claims_url: str = Field(default="")
+    mcp_policies_url: str = Field(default="")
+    mcp_users_url: str = Field(default="")
+    mcp_documents_url: str = Field(default="")
+    mcp_shared_secret: str = Field(default="")
 
-    # ── LLM (used indirectly via core/models/factory.py) ──────────
-    llm_provider:         str = Field(default="claude", alias="LLM_PROVIDER")
-    llm_provider_api_key: str = Field(default="",       alias="LLM_PROVIDER_API_KEY")
-    model_name:           str = Field(default="",       alias="MODEL_NAME")
+    # ── Proposal signing ─────────────────────────────────────────────────────
+    hmac_proposal_key: str = Field(default="")
 
-    # ── Database (only used by MCPs; orchestrator never queries DB
-    #              directly — Rule 2)
-    database_url: str = Field(default="", alias="DATABASE_URL")
+    # ── Redis ────────────────────────────────────────────────────────────────
+    redis_url: str = Field(default="")
 
-    # ── MCP server SSE endpoints (Rule 7 — all MCP comms over SSE) ─
-    # Defaults point to localhost ports for direct-run dev.
-    # Docker/K8s override these with container-network URLs via .env.
-    users_mcp_url:    str = Field(default="http://localhost:8004/sse", alias="MCP_USERS_URL")
-    policies_mcp_url: str = Field(default="http://localhost:8003/sse", alias="MCP_POLICIES_URL")
-    claims_mcp_url:   str = Field(default="http://localhost:8002/sse", alias="MCP_CLAIMS_URL")
-    documents_mcp_url:str = Field(default="http://localhost:8005/sse", alias="MCP_DOCUMENTS_URL")
-    legacy_mcp_url:   str = Field(default="http://localhost:8006/sse", alias="MCP_LEGACY_URL")
+    # ── JWT / RBAC (Rule 7) ──────────────────────────────────────────────────
+    # jwt_secret_key validated in cross_validate (not @field_validator) so
+    # get_settings() can be called at import time without raising.
+    jwt_secret_key: str = Field(default="dev-only-replace-me-at-least-32-chars-long")
+    jwt_algorithm: str = Field(default="HS256")
+    jwt_expiration_hours: int = Field(default=24, ge=1, le=720)
+    jwt_audience: str = Field(default="")
+    jwt_issuer: str = Field(default="")
+    # Dev-only bootstrap endpoint protection (disabled in prod — Rule 8).
+    dev_bootstrap_secret: str = Field(default="")
 
-    # ── Redis (Fix A — shared state across replicas) ──────────────
-    # When set, ownership registry, stream tickets, and approval
-    # idempotency/rate-limit caches use Redis instead of in-process
-    # TTLCache/dicts. Required for multi-replica deployments.
-    # If absent, falls back to in-memory (single-replica / dev only).
-    redis_url: str = Field(default="", alias="REDIS_URL")
-
-    # Master Patch Part 1 — shared HMAC secret for MCP transport auth.
-    # Validated by every MCP server's MCPAuthMiddleware before the SSE
-    # upgrade. Generate with: openssl rand -hex 32 (>=32 chars required).
-    # Closes the post-Fix-1 gap where MCP servers accepted any HTTP client.
-    mcp_shared_secret: str = Field(default="", alias="MCP_SHARED_SECRET")
-
-    # Master Patch Part 3 — HMAC-SHA256 key for signing trace_id markers
-    # written into claims.ai_reasoning. The orchestrator signs every
-    # marker before persistence; the claims MCP's append_reasoning tool
-    # rejects any caller-controlled text containing unsigned markers,
-    # closing the audit-trail spoofing vector. >=32 chars required.
-    proposal_signing_key: str = Field(default="", alias="PROPOSAL_SIGNING_KEY")
-
-    # ── File storage (Fix #73) ────────────────────────────────────
-    # Persistent directory for uploaded PDFs. Must be a volume mount in
-    # production — /tmp is cleared on pod restart. App raises RuntimeError
-    # at startup if this is /tmp (or empty) in production/staging.
-    # Set via CLAIM_UPLOAD_DIR in .env.
-    claim_upload_dir: str = Field(
-        default="/tmp/claim-uploads",
-        alias="CLAIM_UPLOAD_DIR",
-    )
-
-    # ── Agent / pipeline ──────────────────────────────────────────
-    max_retry_attempts: int = Field(default=3, alias="MAX_RETRY_ATTEMPTS")
-
-    # ── CORS (Fix #66) ────────────────────────────────────────────
-    # Comma-separated list of allowed browser origins stored as a raw
-    # string (pydantic-settings tries JSON-decode on list[str] fields
-    # before validators run, breaking comma-separated values).
-    # Use settings.cors_origins_list for the parsed list.
-    # Example: CORS_ALLOWED_ORIGINS=http://localhost:3000,https://app.insureai.io
-    cors_allowed_origins: str = Field(
-        default="http://localhost:3000,http://localhost:8000",
-        alias="CORS_ALLOWED_ORIGINS",
-    )
+    # ── CORS ─────────────────────────────────────────────────────────────────
+    # Comma-separated list; parsed via cors_origins_list property.
+    cors_allowed_origins: str = Field(default="http://localhost:3000,http://localhost:8000")
 
     @property
     def cors_origins_list(self) -> list[str]:
-        """Return CORS_ALLOWED_ORIGINS as a parsed list of stripped strings."""
         return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
 
-    # ── JWT / RBAC (Rule 7) ───────────────────────────────────────
-    jwt_secret_key:       str = Field(default="dev-only-replace-me", alias="JWT_SECRET_KEY")
-    jwt_algorithm:        str = Field(default="HS256",                alias="JWT_ALGORITHM")
-    jwt_expiration_hours: int = Field(default=24,                     alias="JWT_EXPIRATION_HOURS")
+    # ── Analyst loop limits ──────────────────────────────────────────────────
+    analyst_max_steps: int = Field(default=10, ge=1, le=50)
+    analyst_timeout_seconds: int = Field(default=60, ge=5, le=600)
+    analyst_proposal_ttl_seconds: int = Field(default=300, ge=60, le=3600)
 
-    # Optional aud/iss claims validated by decode_jwt when non-empty.
-    # Set in production to bind tokens to this specific service.
-    jwt_audience: str = Field(default="", alias="JWT_AUDIENCE")
-    jwt_issuer:   str = Field(default="", alias="JWT_ISSUER")
+    # ── File upload (Phase 4) ────────────────────────────────────────────────
+    # Must be a persistent volume mount in production — never /tmp (Rule 10).
+    claim_upload_dir: str = Field(default="./data/uploads")
+    max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
 
-    # ── Observability — Langfuse self-hosted (Phase D1.2) ────────
-    # Set all three to opt-in. When `langfuse_public_key` is empty the
-    # tracer factory returns a no-op, so the app keeps working with
-    # no telemetry overhead and no failures.
-    langfuse_host:       str = Field(default="", alias="LANGFUSE_HOST")
-    langfuse_public_key: str = Field(default="", alias="LANGFUSE_PUBLIC_KEY")
-    langfuse_secret_key: str = Field(default="", alias="LANGFUSE_SECRET_KEY")
-    # Browser-accessible URL (D5.1 deep-links); falls back to host if empty.
-    langfuse_public_url: str = Field(default="", alias="LANGFUSE_PUBLIC_URL")
+    # ── Rate limiting (Phase 4) ──────────────────────────────────────────────
+    # Sliding window per user/IP. Fail-open when Redis is unavailable.
+    rate_limit_requests: int = Field(default=60, ge=1)
+    rate_limit_window_seconds: int = Field(default=60, ge=1)
 
-    @property
-    def langfuse_enabled(self) -> bool:
-        """True iff all three Langfuse settings are populated."""
-        return bool(
-            self.langfuse_host
-            and self.langfuse_public_key
-            and self.langfuse_secret_key
-        )
+    # ── mTLS client certs (F4.7) ─────────────────────────────────────────────
+    # Paths to certs used by the orchestrator when connecting to MCP servers.
+    # All three must be set to enable mTLS; any empty value disables it (dev default).
+    # Generate with: bash scripts/certs/gen_dev_certs.sh
+    mcp_client_cert: str = Field(default="")   # MCP_CLIENT_CERT — orchestrator.crt
+    mcp_client_key: str = Field(default="")    # MCP_CLIENT_KEY  — orchestrator.key
+    mcp_ca_cert: str = Field(default="")       # MCP_CA_CERT     — ca.crt
+
+    # ── HTTP bind ────────────────────────────────────────────────────────────
+    bind_host: str = Field(default="0.0.0.0")  # nosec B104
+    bind_port: int = Field(default=8000, ge=1, le=65535)
+
+    @field_validator("analyst_model_tier")
+    @classmethod
+    def _tier(cls, v: str) -> str:
+        if v.lower() not in {"low", "medium", "high"}:
+            raise ValueError("ANALYST_MODEL_TIER must be 'low' | 'medium' | 'high'")
+        return v.lower()
+
+    @field_validator("hmac_proposal_key")
+    @classmethod
+    def _hmac_key(cls, v: str) -> str:
+        if v and len(v) < 32:
+            raise ValueError("HMAC_PROPOSAL_KEY must be ≥ 32 characters when set")
+        return v
+
+    @field_validator("mcp_shared_secret")
+    @classmethod
+    def _mcp_secret(cls, v: str) -> str:
+        if v and len(v) < 32:
+            raise ValueError("MCP_SHARED_SECRET must be ≥ 32 characters when set")
+        return v
+
+    @field_validator("mcp_claims_url", "mcp_policies_url", "mcp_users_url", "mcp_documents_url")
+    @classmethod
+    def _url_required(cls, v: str) -> str:
+        if v and not v.startswith(("http://", "https://")):
+            raise ValueError("MCP URL must be an http(s) endpoint")
+        return v
+
+    def cross_validate(self) -> None:
+        """Startup-time checks — stronger than field validators.
+
+        Called explicitly in lifespan so import-time instantiation
+        (e.g. for CORS config) never raises.
+        """
+        _PROD_ENVS = {"production", "prod", "staging"}
+        in_prod = self.environment.lower() in _PROD_ENVS
+
+        if not self.hmac_proposal_key or len(self.hmac_proposal_key) < 32:
+            raise ValueError("HMAC_PROPOSAL_KEY must be ≥ 32 characters")
+        if not self.mcp_shared_secret or len(self.mcp_shared_secret) < 32:
+            raise ValueError("MCP_SHARED_SECRET must be ≥ 32 characters")
+        if self.hmac_proposal_key == self.mcp_shared_secret:
+            raise ValueError("HMAC_PROPOSAL_KEY must differ from MCP_SHARED_SECRET")
+
+        if in_prod:
+            if not self.jwt_secret_key or self.jwt_secret_key.startswith("dev-only"):
+                raise ValueError("JWT_SECRET_KEY must be set to a strong secret in production")
+            if len(self.jwt_secret_key) < 32:
+                raise ValueError("JWT_SECRET_KEY must be ≥ 32 characters in production")
+            if self.claim_upload_dir.startswith("/tmp"):
+                raise ValueError("CLAIM_UPLOAD_DIR must not be /tmp in production — use a persistent volume")
+
+        for url_field in (self.mcp_claims_url, self.mcp_policies_url, self.mcp_users_url, self.mcp_documents_url):
+            if not url_field.startswith(("http://", "https://")):
+                raise ValueError("MCP URL must be an http(s) endpoint")
+
+        active_spec = {"low": self.low_model, "medium": self.medium_model, "high": self.high_model}[self.analyst_model_tier]
+        if not active_spec:
+            raise ValueError(f"{self.analyst_model_tier.upper()}_MODEL is not set")
+        provider, _, _ = active_spec.partition(":")
+        provider = provider.strip().lower()
+        if provider == "anthropic" and (not self.anthropic_api_key or self.anthropic_api_key.startswith("PLACEHOLDER")):
+            raise ValueError("active tier uses anthropic but ANTHROPIC_API_KEY is missing/placeholder")
+        if provider == "openai" and not self.openai_api_key:
+            raise ValueError("active tier uses openai but OPENAI_API_KEY is missing")
+        if provider == "gemini" and not self.gemini_api_key:
+            raise ValueError("active tier uses gemini but GEMINI_API_KEY is missing")
+        if provider == "local" and not self.local_base_url:
+            raise ValueError("active tier uses local but LOCAL_BASE_URL is missing")
 
 
 @lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    """Return the singleton Settings instance (cached for app lifetime)."""
-    return Settings()
+def get_settings() -> OrchestratorSettings:
+    """Return a cached OrchestratorSettings instance.
+
+    Safe to call at import time — does NOT run cross_validate().
+    cross_validate() is called once in lifespan at startup.
+    """
+    return OrchestratorSettings()

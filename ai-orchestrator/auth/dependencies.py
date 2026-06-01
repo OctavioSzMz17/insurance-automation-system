@@ -1,48 +1,36 @@
 """FastAPI dependencies that enforce JWT auth + role-based access (Rule 7).
 
-Usage in a route:
-
+Usage:
     from auth import require_role, Role
 
-    @router.post("/claims/{id}/approve")
-    async def approve(..., user = Depends(require_role(Role.AUDITOR))):
-        # `user` is a UserPrincipal — guaranteed valid + role-checked
+    @router.post("/endpoint")
+    async def handler(user: UserPrincipal = Depends(require_role(Role.AUDITOR))):
         ...
-
-If the request is missing a token → 401.
-If the token is bad / expired      → 401.
-If the role is too low             → 403.
 """
-
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from .jwt   import decode_jwt
+from .jwt import decode_jwt
 from .roles import Role, UserPrincipal, has_role_or_higher
 
+logger = logging.getLogger(__name__)
 
-# HTTPBearer auto-extracts the token from "Authorization: Bearer <token>".
-# auto_error=True → missing header returns 403 by default; we override to 401
-# inside the dependency so the error semantics match RFC 6750.
 _bearer = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    request:     Request,
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> UserPrincipal:
-    """Resolve the request's authenticated user from its bearer token.
+    """Resolve the authenticated user from the bearer token.
 
-    Fix #69 — after signature verification, checks the token's `jti`
-    against the Redis JTI revocation set. A revoked token is rejected
-    with 401 even if the signature is valid and the token has not expired.
-    Falls back gracefully when Redis is unavailable (logs a warning, does
-    not block the request — fail-open so a Redis outage doesn't lock out
-    all users).
+    Checks the JTI against a Redis blocklist after signature verification.
+    Fail-open when Redis is unavailable (logs warning, does not block request).
     """
     if credentials is None or not credentials.credentials:
         raise HTTPException(
@@ -52,10 +40,9 @@ async def get_current_user(
         )
 
     payload = decode_jwt(credentials.credentials)
-
     redis = getattr(request.app.state, "redis", None)
 
-    # Fix #69 — JTI revocation check via Redis blocklist.
+    # JTI revocation check
     jti = payload.get("jti")
     if jti and redis is not None:
         try:
@@ -69,15 +56,9 @@ async def get_current_user(
         except HTTPException:
             raise
         except Exception as exc:
-            import logging
-            logging.getLogger(__name__).warning(
-                "JTI revocation check failed (Redis error) — fail-open | jti=%s err=%s",
-                jti, exc,
-            )
-    # Fix #89 — per-user revocation check.
-    # When an admin calls POST /auth/revoke-user/{sub}, a `revoked_before:{sub}`
-    # key is written to Redis.  Any token whose `iat` < that timestamp is
-    # rejected.  Fail-open when Redis is unavailable (same policy as JTI check).
+            logger.warning("JTI revocation check failed (Redis error) — fail-open | jti=%s err=%s", jti, exc)
+
+    # Per-user revocation check
     token_sub = payload.get("sub", "")
     token_iat = payload.get("iat", 0)
     if token_sub and redis is not None:
@@ -94,13 +75,9 @@ async def get_current_user(
         except HTTPException:
             raise
         except Exception as exc:
-            import logging
-            logging.getLogger(__name__).warning(
-                "Per-user revocation check failed (Redis error) — fail-open | sub=%s err=%s",
-                token_sub, exc,
-            )
+            logger.warning("Per-user revocation check failed — fail-open | sub=%s err=%s", token_sub, exc)
 
-    sub      = payload.get("sub")
+    sub = payload.get("sub")
     role_str = payload.get("role")
     if not sub or not role_str:
         raise HTTPException(
@@ -122,18 +99,9 @@ async def get_current_user(
 
 
 def require_role(min_role: Role) -> Callable[..., UserPrincipal]:
-    """Factory: returns a FastAPI dependency that enforces `min_role`.
+    """Factory that returns a FastAPI dependency enforcing min_role."""
 
-    Args:
-        min_role: Minimum tier required to access the endpoint.
-
-    Returns:
-        An async dependency function for use with Depends().
-    """
-
-    async def _checker(
-        user: UserPrincipal = Depends(get_current_user),
-    ) -> UserPrincipal:
+    async def _checker(user: UserPrincipal = Depends(get_current_user)) -> UserPrincipal:
         if not has_role_or_higher(user.role, min_role):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

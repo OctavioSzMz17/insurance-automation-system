@@ -1,0 +1,173 @@
+# Local-development compose. NEVER referenced from production manifests (Rule 10).
+# Postgres + Redis are optional here: by default the MCPs and the orchestrator talk to the
+# managed Neon/Redis instances configured in .env (the same that pytest uses). If you want a
+# fully-local stack, activate the `local-db` profile.
+#
+# One-liner to bring everything up:
+#     docker compose up --build
+#
+# One-liner to bring everything down:
+#     docker compose down
+
+services:
+
+  # ── Build-only service: materialises the shared base image used by all MCP services. ──
+  base:
+    image: insurance-mcp-base:latest
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.mcp-base
+    profiles: ["build-only"]
+
+  # ── Optional local Postgres / Redis (profile-gated) ──
+  postgres:
+    image: postgres:16.4-alpine@sha256:d0f363f8366fbc3f52d172c6e76bc27151c3d643b870e1062b4e8bfe65baf609
+    environment:
+      POSTGRES_USER: insurance
+      POSTGRES_PASSWORD: insurance_local_password
+      POSTGRES_DB: insurance
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U insurance -d insurance"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    profiles: ["local-db"]
+
+  redis:
+    image: redis:7.4-alpine@sha256:c33da3b14d7c6d57f3b9fbb33df7e9aac8aa3f2e1ee6a4cd7e1c5c9adf3a6b66
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    profiles: ["local-db"]
+
+  # ── 4 MCP servers (always on). env_file: .env carries MCP_SHARED_SECRET,
+  #    MCP_WRITE_ENABLED, DATABASE_URL, REDIS_URL, etc. ──
+
+  claims:
+    image: insurance-mcp-claims:latest
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.mcp-claims
+    env_file: .env
+    environment:
+      MCP_DOMAIN: claims
+      DATABASE_URL: ${DATABASE_URL_CLAIMS:-${DATABASE_URL}}
+      # mTLS (optional). Mount infra/certs/dev and set these to enable TLS.
+      # MCP_TLS_CERT: /certs/claims.crt
+      # MCP_TLS_KEY:  /certs/claims.key
+      # MCP_CA_CERT:  /certs/ca.crt
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health').read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  policies:
+    image: insurance-mcp-policies:latest
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.mcp-policies
+    env_file: .env
+    environment:
+      MCP_DOMAIN: policies
+      DATABASE_URL: ${DATABASE_URL_POLICIES:-${DATABASE_URL}}
+    ports:
+      - "8002:8002"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health').read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  users:
+    image: insurance-mcp-users:latest
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.mcp-users
+    env_file: .env
+    environment:
+      MCP_DOMAIN: users
+      DATABASE_URL: ${DATABASE_URL_USERS:-${DATABASE_URL}}
+    ports:
+      - "8003:8003"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health').read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  documents:
+    image: insurance-mcp-documents:latest
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.mcp-documents
+    env_file: .env
+    environment:
+      MCP_DOMAIN: documents
+      DATABASE_URL: ${DATABASE_URL_DOCUMENTS:-${DATABASE_URL}}
+      CLAIM_UPLOAD_DIR: /app/data/uploads
+    ports:
+      - "8004:8004"
+    volumes:
+      # Bind-mount the host upload dir so PDFs you copy with scripts/prepare_test_pdf.py
+      # are visible to the documents MCP without rebuilding the image.
+      - ./data/uploads:/app/data/uploads
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health').read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── Orchestrator: analyst + auditor + HITL + mutation handler. ──
+  orchestrator:
+    image: insurance-orchestrator:latest
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.orchestrator
+    env_file: .env
+    environment:
+      # Inside the docker network the MCPs are addressed by service name, NOT localhost.
+      # Change http:// → https:// when MCP TLS is enabled.
+      MCP_CLAIMS_URL: http://claims:8001
+      MCP_POLICIES_URL: http://policies:8002
+      MCP_USERS_URL: http://users:8003
+      MCP_DOCUMENTS_URL: http://documents:8004
+      # Must match the documents MCP so the uploaded PDF lands in the shared volume below.
+      CLAIM_UPLOAD_DIR: /app/data/uploads
+      # mTLS client cert (optional). Uncomment and mount infra/certs/dev to enable.
+      # MCP_CLIENT_CERT: /certs/orchestrator.crt
+      # MCP_CLIENT_KEY:  /certs/orchestrator.key
+      # MCP_CA_CERT:     /certs/ca.crt
+    ports:
+      - "8000:8000"
+    volumes:
+      # Same bind-mount as the documents MCP: the orchestrator writes the uploaded
+      # PDF here and the documents MCP reads it from the same host directory.
+      - ./data/uploads:/app/data/uploads
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    depends_on:
+      claims:
+        condition: service_healthy
+      policies:
+        condition: service_healthy
+      users:
+        condition: service_healthy
+      documents:
+        condition: service_healthy
+
+volumes:
+  pg_data:

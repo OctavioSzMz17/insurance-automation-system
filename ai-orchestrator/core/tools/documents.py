@@ -1,46 +1,56 @@
-"""LangChain @tool wrapper for the Documents MCP server.
-
-Fix 1 (Rule 7): calls the documents MCP over SSE instead of in-process.
-
-Rules applied:
-    Rule 3  — Read-only domain (PDF parsing)
-    Rule 7  — Out-of-process SSE call; no in-process imports
-    Rule 11 — Type hints throughout
-"""
-
+"""Typed wrappers for the documents MCP."""
 from __future__ import annotations
 
-import logging
 from typing import Any
+from uuid import UUID
 
-from langchain_core.tools import tool
-
-from ..mcp_client import call_mcp_tool
-
-logger = logging.getLogger(__name__)
+from ._spec import mcp_tool
 
 
-@tool
-async def extract_claim_from_pdf(pdf_path: str) -> dict[str, Any]:
-    """Parse an insurance claim PDF and extract structured fields.
-
-    Returns a dict with: claim_id, user_id, insured_name, incident_date,
-    description, location, damage_summary, and reported_damage_amount.
-
-    Use this as the FIRST tool to call when given a pdf_path. The user_id
-    in the returned dict feeds into get_user_by_id.
-
-    Args:
-        pdf_path: Absolute filesystem path to the PDF file.
-    """
-    from config import get_settings
-    logger.info(f"@tool extract_claim_from_pdf | pdf_path={pdf_path}")
-    settings = get_settings()
-    return await call_mcp_tool(
-        settings.documents_mcp_url,
-        "extract_claim_from_pdf",
-        {"pdf_path": pdf_path},
-    )
+def _schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "pipeline_id": {"type": "string"},
+            "caller_sub": {"type": "string"},
+            "caller_role": {"type": "string"},
+        },
+        "required": ["pipeline_id", "caller_sub", "caller_role"],
+        "additionalProperties": False,
+    }
 
 
-DOCUMENTS_TOOLS = [extract_claim_from_pdf]
+@mcp_tool(
+    domain="documents",
+    mcp_tool="parse_pdf",
+    description="Parse a PDF inside CLAIM_UPLOAD_DIR: returns text, page_count, sha256.",
+    input_schema=_schema(),
+)
+async def parse_pdf(pool: Any, *, pipeline_id: UUID | str, caller_sub: str, caller_role: str) -> dict[str, Any]:
+    return await pool.call("documents", "parse_pdf", {
+        "pipeline_id": str(pipeline_id), "caller_sub": caller_sub, "caller_role": caller_role,
+    })
+
+
+@mcp_tool(
+    domain="documents",
+    mcp_tool="compute_sha256",
+    description="Compute SHA-256 of the PDF for {pipeline_id} inside CLAIM_UPLOAD_DIR.",
+    input_schema=_schema(),
+)
+async def compute_sha256(pool: Any, *, pipeline_id: UUID | str, caller_sub: str, caller_role: str) -> dict[str, Any]:
+    return await pool.call("documents", "compute_sha256", {
+        "pipeline_id": str(pipeline_id), "caller_sub": caller_sub, "caller_role": caller_role,
+    })
+
+
+@mcp_tool(
+    domain="documents",
+    mcp_tool="extract_text",
+    description="Extract plain text + page count from the PDF. Truncates very large files.",
+    input_schema=_schema(),
+)
+async def extract_text(pool: Any, *, pipeline_id: UUID | str, caller_sub: str, caller_role: str) -> dict[str, Any]:
+    return await pool.call("documents", "extract_text", {
+        "pipeline_id": str(pipeline_id), "caller_sub": caller_sub, "caller_role": caller_role,
+    })

@@ -1,0 +1,5 @@
+# Never commit private keys or self-signed certs to source control.
+*.key
+*.crt
+*.csr
+*.srl

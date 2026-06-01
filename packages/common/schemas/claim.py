@@ -1,68 +1,74 @@
-"""Claim schema for the Insurance Automation System.
+"""Claim, ClaimDecision, ClaimProposal schemas.
 
-Rule 1: Shared schemas live exclusively in packages/common/.
-Rule 11: All fields strictly typed via Pydantic.
-Rule 2: Monetary fields use Decimal (never float).
+- Claim row: includes `submitted_by_sub` (ACL anchor) and `decision_metadata` (audit) — Rule 2.
+- ClaimDecision: strict=forbid because it is the auditor security boundary — Rule 4.
+- ClaimProposal: HMAC-signed handoff between agent and human-approval gate — Rule 6.
 """
+from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from decimal import Decimal
-from typing import Optional
+from typing import Literal
+from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from packages.common.enums import ClaimStatus, SeverityLabel
+from ..enums import ClaimStatus, SeverityLabel
+from ..money import to_money
 
 
-class ClaimSchema(BaseModel):
-    """Full claim record as stored in the database."""
+class Claim(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    claim_id:               Optional[int] = None          # set by BIGSERIAL on insert
-    user_id:                int
-    policy_id:              int
-    incident_date:          date
-    incident_description:   str
-    incident_location:      Optional[str] = None
-    severity_label:         SeverityLabel
-    reported_damage_amount: Optional[Decimal] = None
-    claim_status:           ClaimStatus
-    ai_reasoning:           str
+    id: UUID
+    submitted_by_sub: str = Field(min_length=1, max_length=255)
+    policy_id: UUID
+    pdf_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    reported_damage_amount: Decimal
+    severity: SeverityLabel
+    status: ClaimStatus
+    decision_metadata: dict[str, object] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
 
-    # Audit timestamps — set by DB
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-
-    @field_validator("incident_description")
+    @field_validator("reported_damage_amount", mode="before")
     @classmethod
-    def description_must_not_be_empty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("incident_description must not be empty")
-        return v.strip()
-
-    @field_validator("ai_reasoning")
-    @classmethod
-    def reasoning_must_not_be_empty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("ai_reasoning must not be empty (Rule 4)")
-        return v.strip()
-
-    @field_validator("reported_damage_amount")
-    @classmethod
-    def amount_must_be_non_negative(cls, v: Optional[Decimal]) -> Optional[Decimal]:
-        if v is not None and v < 0:
-            raise ValueError("reported_damage_amount must be >= 0")
-        return v
+    def _coerce_money(cls, v: object) -> Decimal:
+        return to_money(v)  # type: ignore[arg-type]
 
 
-class ClaimCreateSchema(BaseModel):
-    """Input schema for inserting a new claim — what the auditor_agent submits."""
+class ClaimSubmitRequest(BaseModel):
+    """Request body for claim submission. `pdf_path` is validated by the orchestrator (Rule 13)."""
 
-    user_id:                int
-    policy_id:              int
-    incident_date:          date
-    incident_description:   str = Field(..., min_length=1)
-    incident_location:      Optional[str] = None
-    severity_label:         SeverityLabel
-    reported_damage_amount: Optional[Decimal] = None
-    claim_status:           ClaimStatus
-    ai_reasoning:           str = Field(..., min_length=1)
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    policy_id: UUID
+    pdf_path: str = Field(min_length=1, max_length=512)
+
+
+class ClaimDecision(BaseModel):
+    """Auditor output. Strict forbid — this is the security boundary (Rule 4)."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    claim_id: UUID
+    decision: Literal["APPROVED", "REJECTED", "MANUAL_REVIEW"]
+    reason: str = Field(min_length=1, max_length=2000)
+    evidence: tuple[str, ...] = ()
+    model: str = Field(min_length=1, max_length=128)
+    model_version: str = Field(min_length=1, max_length=64)
+    decided_at: datetime
+
+
+class ClaimProposal(BaseModel):
+    """Signed handoff object emitted by an agent for human approval (Rule 6)."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    proposal_id: UUID
+    pipeline_id: UUID
+    actor: Literal["analyst", "auditor"]
+    payload_sha256: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    signature_hex: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    issued_at: datetime
+    expires_at: datetime

@@ -1,15 +1,8 @@
-"""Redis async client factory — Fix A.
+"""Async Redis client factory for auth modules.
 
-Creates a single redis.asyncio.Redis client from the REDIS_URL setting.
-Returns None when REDIS_URL is absent or empty so callers can fall back
-to in-memory stores without raising an error.
-
-Rules applied:
-    Rule 8  — URL read exclusively from Settings / .env; never hardcoded
-    Rule 9  — Structured logging on connect/fail
-    Rule 11 — Type hints throughout
+Returns None when REDIS_URL is absent so callers fall back to
+in-memory stores without raising (fail-open for single-replica dev).
 """
-
 from __future__ import annotations
 
 import logging
@@ -19,42 +12,26 @@ logger = logging.getLogger(__name__)
 
 
 async def create_redis_client(redis_url: str) -> Optional[object]:
-    """Return an initialised redis.asyncio.Redis client, or None.
-
-    Args:
-        redis_url: Value of settings.redis_url (may be empty string).
-
-    Returns:
-        A connected redis.asyncio.Redis instance, or None if the URL is
-        not configured or the connection fails (fail-open: the app keeps
-        running with in-memory fallback).
-    """
     if not redis_url:
         return None
 
     try:
-        import redis.asyncio as aioredis  # type: ignore[import]
+        import redis.asyncio as aioredis
     except ImportError:
-        logger.warning(
-            "redis package not installed — running with in-memory stores. "
-            "Install with: pip install 'redis[asyncio]'"
-        )
+        logger.warning("redis package not installed — in-memory fallback active")
         return None
 
     try:
         client = aioredis.from_url(
             redis_url,
-            decode_responses=False,   # we handle bytes → str explicitly
+            decode_responses=False,
             socket_connect_timeout=5,
             socket_timeout=5,
             retry_on_timeout=True,
         )
-        # Verify the connection is reachable before handing it to callers.
         await client.ping()
-        logger.info("Redis ping OK | connected")
+        logger.info("Auth Redis ping OK")
         return client
     except Exception as exc:
-        logger.error(
-            "Redis connection failed — falling back to in-memory stores | err=%r", exc,
-        )
+        logger.error("Auth Redis connection failed — in-memory fallback | err=%r", exc)
         return None

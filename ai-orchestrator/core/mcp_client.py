@@ -1,205 +1,191 @@
-"""Async SSE client for out-of-process MCP tool invocation (Rule 7).
+"""MCP client pool — one persistent SSE session per server, shared across tool calls (Rule 7).
 
-Replaces the in-process importlib loader (_loader.py, eradicated in Fix 1).
-Every MCP call goes over HTTP/SSE — never in-process file imports.
+Why a pool:
+- Rule 7 forbids opening a new HTTP+SSE connection per tool call (pool exhaustion, latency).
+- We initialise four sessions in app lifespan startup and tear them down in shutdown.
+- Tool callers acquire the existing session by domain name; they never construct one.
 
-Master Patch Part 1 — every outbound request now carries
-`X-MCP-Secret`, the shared HMAC token validated by the MCP servers'
-MCPAuthMiddleware. Without it the server returns 403 before the SSE
-upgrade completes.
+Error contract:
+- The MCP servers return JSON with a `kind` field ('business' | 'internal').
+- 'business' → BusinessError surfaced as-is (the caller decides how to react).
+- 'internal' → MCPClientError(public='upstream_internal_error') — raw detail never leaks.
 
-Usage:
-    from core.mcp_client import call_mcp_tool
-
-    result = await call_mcp_tool(
-        url="http://mcp-claims:8002/sse",
-        tool_name="get_claim_by_id",
-        arguments={"claim_id": 42},
-    )
+Reconnection:
+- If the session drops (network blip, MCP restart), the next acquire reconnects with
+  exponential backoff (1, 2, 4, 8, 16s; max 30s). After 5 consecutive failures, the
+  caller gets MCPClientError so the pipeline can mark MANUAL_REVIEW rather than hang.
 """
-
 from __future__ import annotations
 
+import asyncio
 import json
-import logging
+from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
 from typing import Any
 
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
-logger = logging.getLogger(__name__)
+from packages.common.exceptions import BusinessError, MCPClientError
 
-# SSE connection timeout — time to establish the HTTP+SSE handshake.
-_CONNECT_TIMEOUT: float = 10.0
-# Read timeout — max wait for the tool to respond after the call is sent.
-_READ_TIMEOUT: float = 30.0
+from .config_runtime import OrchestratorRuntimeView
+from .logging_bridge import get_logger
+from .tls import McpHttpClientFactory, make_mtls_factory
+
+_logger = get_logger(__name__)
+
+_DOMAINS = ("claims", "policies", "users", "documents")
+_BACKOFF_SEQ = (1, 2, 4, 8, 16, 30)
 
 
-# ── Master Patch Part 4 — sanitised exception envelope ──────────────
+@dataclass
+class _SessionEntry:
+    domain: str
+    url: str
+    secret: str
+    session: ClientSession | None = None
+    stack: AsyncExitStack | None = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-class MCPClientError(Exception):
-    """Transport / protocol failure while invoking an MCP tool.
 
-    Splits the verbose internal detail (URL, exception chain, traceback)
-    from a safe public message suitable for a user-facing HTTP body.
+class MCPClientPool:
+    """Owns the four persistent SSE sessions. Lifecycle managed by the app lifespan."""
 
-    Use:
-        raise MCPClientError(
-            public=f"Upstream service '{tool}' is temporarily unavailable",
-            internal=f"MCP call failed [{tool}@{url}]: {exc!r}",
+    def __init__(self, runtime: OrchestratorRuntimeView) -> None:
+        self._entries: dict[str, _SessionEntry] = {
+            "claims":    _SessionEntry("claims",    runtime.mcp_claims_url,    runtime.mcp_shared_secret),
+            "policies":  _SessionEntry("policies",  runtime.mcp_policies_url,  runtime.mcp_shared_secret),
+            "users":     _SessionEntry("users",     runtime.mcp_users_url,     runtime.mcp_shared_secret),
+            "documents": _SessionEntry("documents", runtime.mcp_documents_url, runtime.mcp_shared_secret),
+        }
+        # Build mTLS factory once — None when TLS is not configured (dev default).
+        self._mtls_factory: McpHttpClientFactory | None = make_mtls_factory(
+            client_cert=runtime.mcp_client_cert,
+            client_key=runtime.mcp_client_key,
+            ca_cert=runtime.mcp_ca_cert,
         )
+        if self._mtls_factory is not None:
+            _logger.info("mcp pool: mTLS enabled", extra={"event": "mcp.pool.mtls_enabled"})
+        self._started = False
 
-    Routing layer:
-        except MCPClientError as e:
-            logger.error("...", extra={"internal": e.internal}, exc_info=True)
-            raise HTTPException(status_code=502, detail=e.public)
+    # ── lifecycle ────────────────────────────────────────────────────────────
 
-    The internal string is what `str(e)` returns (so default logging is
-    verbose); the public string is what the FastAPI handler must echo
-    back to the client — never the internal string.
-    """
+    async def start(self) -> None:
+        """Open all four sessions. Failures are logged and the affected domain is left
+        in a reconnect state — start() does NOT raise on partial failure, because in
+        development a domain may be offline temporarily and we still want the others up."""
+        for domain in _DOMAINS:
+            try:
+                await self._open(domain)
+            except Exception:
+                _logger.exception(
+                    "mcp pool: initial connect failed",
+                    extra={"event": "mcp.pool.connect_fail", "domain": domain},
+                )
+        self._started = True
 
-    def __init__(self, public: str, internal: str) -> None:
-        super().__init__(internal)
-        self.public: str = public
-        self.internal: str = internal
+    async def stop(self) -> None:
+        for entry in self._entries.values():
+            await self._close(entry)
+        self._started = False
 
-    def __repr__(self) -> str:  # pragma: no cover — debug aid
-        return f"MCPClientError(public={self.public!r}, internal={self.internal!r})"
+    # ── tool call ────────────────────────────────────────────────────────────
 
-
-def _auth_headers() -> dict[str, str]:
-    """Build the auth header dict sent with every MCP SSE connection.
-
-    Resolved lazily so an orchestrator misconfiguration surfaces at first
-    MCP call (clear stack trace) rather than at module import.
-    """
-    # Local import keeps mcp_client importable in test contexts that
-    # mock config without bringing pydantic-settings into scope.
-    from config import get_settings
-
-    secret = get_settings().mcp_shared_secret
-    if not secret:
-        raise RuntimeError(
-            "MCP_SHARED_SECRET is not configured for the orchestrator. "
-            "Set it in .env — every MCP server requires it on the "
-            "X-MCP-Secret header (Master Patch Part 1)."
-        )
-    return {"X-MCP-Secret": secret}
-
-
-async def call_mcp_tool(
-    url: str,
-    tool_name: str,
-    arguments: dict[str, Any],
-) -> Any:
-    """Invoke one MCP tool over SSE and return its parsed result.
-
-    Opens a fresh SSE connection per call, initialises the MCP session,
-    calls the tool, and tears down the connection cleanly. Connection
-    pooling / persistent sessions are a future optimisation.
-
-    Args:
-        url:        Full SSE endpoint, e.g. "http://mcp-claims:8002/sse".
-        tool_name:  MCP tool name as declared in the server's TOOLS list.
-        arguments:  Dict of named arguments matching the tool's inputSchema.
-
-    Returns:
-        Parsed Python value from the tool's JSON TextContent response.
-        Returns an empty dict when the server returns no content.
-
-    Raises:
-        ValueError:      Tool returned {"error": ...} — caller/business error
-                         (e.g. "Claim 42 not found"). Safe to surface verbatim.
-        MCPClientError:  Transport failure, parsing failure, or MCP-level
-                         isError. The internal attribute carries the full
-                         traceback for logging; the public attribute carries
-                         a safe sanitised message for HTTP bodies.
-    """
-    logger.debug(
-        "call_mcp_tool | url=%s tool=%s args_keys=%s",
-        url, tool_name, list(arguments.keys()),
-    )
-    # ── Transport layer ─────────────────────────────────────────────
-    try:
-        async with sse_client(
-            url,
-            headers=_auth_headers(),  # Master Patch Part 1 — X-MCP-Secret
-            timeout=_CONNECT_TIMEOUT,
-            sse_read_timeout=_READ_TIMEOUT,
-        ) as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                result = await session.call_tool(tool_name, arguments)
-    except Exception as exc:
-        # Master Patch Part 4 — keep URL / exception class / chain in logs
-        # only. Public message is generic to avoid leaking topology.
-        logger.error(
-            "call_mcp_tool transport failure | url=%s tool=%s err=%r",
-            url, tool_name, exc, exc_info=True,
-        )
-        raise MCPClientError(
-            public=f"Upstream service '{tool_name}' is temporarily unavailable",
-            internal=f"transport failure [{tool_name}@{url}]: {exc!r}",
-        ) from exc
-
-    # ── MCP-level tool error (isError flag) ─────────────────────────
-    if result.isError:
-        raw = (
-            result.content[0].text
-            if result.content and hasattr(result.content[0], "text")
-            else str(result.content)
-        )
-        logger.warning(
-            "call_mcp_tool tool-level error | tool=%s content=%.500s",
-            tool_name, raw,
-        )
-        raise MCPClientError(
-            public=f"Upstream service '{tool_name}' returned an error",
-            internal=f"MCP tool isError [{tool_name}@{url}]: {raw}",
-        )
-
-    if not result.content:
-        return {}
-
-    first = result.content[0]
-    if not hasattr(first, "text"):
-        return {}
-
-    # ── Parsing layer ───────────────────────────────────────────────
-    try:
-        data = json.loads(first.text)
-    except (json.JSONDecodeError, TypeError) as exc:
-        # Non-JSON text content is a degenerate but valid case for some
-        # tools — surface the raw text rather than fail.
-        logger.debug(
-            "call_mcp_tool non-JSON content | tool=%s err=%s preview=%.120s",
-            tool_name, exc, first.text,
-        )
-        return first.text
-
-    # Tools signal errors as {"error": "...", "kind": "business"|"internal"}.
-    #
-    # Fix C — dispatch on "kind" so internal DB/infra errors are sanitised
-    # before they reach the client, while user-facing business errors
-    # ("Claim X not found", "policy already approved") still propagate as
-    # ValueError for the route to translate to 404 / 409 / etc.
-    #
-    #   kind == "internal"          → MCPClientError (sanitised public msg)
-    #   kind == "business" or absent → ValueError (user-facing, existing behaviour)
-    #
-    # Servers that have not yet been updated (no "kind" field) default to
-    # the "business" path so existing callers are not broken.
-    if isinstance(data, dict) and "error" in data:
-        if data.get("kind") == "internal":
-            logger.error(
-                "call_mcp_tool tool-level internal error | tool=%s detail=%.500s",
-                tool_name, data["error"],
+    async def call(self, domain: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        entry = self._entries.get(domain)
+        if entry is None:
+            raise MCPClientError(public=f"unknown mcp domain: {domain}")
+        # Lazy / reconnect-on-demand. The lock serialises reconnection attempts per domain
+        # so a burst of callers does not stampede the broken endpoint.
+        if entry.session is None:
+            async with entry.lock:
+                if entry.session is None:
+                    await self._open_with_backoff(entry)
+        assert entry.session is not None  # noqa: S101 — guarded above
+        try:
+            result = await entry.session.call_tool(tool, arguments)
+        except Exception as exc:  # transport-level failure
+            _logger.warning(
+                "mcp call failed; will reconnect on next use",
+                extra={"event": "mcp.call.fail", "domain": domain, "tool": tool, "err": repr(exc)},
             )
-            raise MCPClientError(
-                public=f"Upstream service '{tool_name}' encountered an internal error",
-                internal=f"tool internal error [{tool_name}@{url}]: {data['error']}",
-            )
-        raise ValueError(data["error"])
+            await self._close(entry)
+            raise MCPClientError(public="upstream transport error") from exc
 
-    return data
+        return _coerce_tool_result(domain, tool, result)
+
+    # ── internal ─────────────────────────────────────────────────────────────
+
+    async def _open(self, domain: str) -> None:
+        entry = self._entries[domain]
+        await self._close(entry)
+        stack = AsyncExitStack()
+        sse_kwargs: dict = {"url": f"{entry.url}/sse", "headers": {"X-MCP-Secret": entry.secret}}
+        if self._mtls_factory is not None:
+            sse_kwargs["httpx_client_factory"] = self._mtls_factory
+        try:
+            read, write = await stack.enter_async_context(
+                sse_client(**sse_kwargs)
+            )
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+        except Exception:
+            await stack.aclose()
+            raise
+        entry.session = session
+        entry.stack = stack
+        _logger.info("mcp session opened", extra={"event": "mcp.pool.open", "domain": domain})
+
+    async def _open_with_backoff(self, entry: _SessionEntry) -> None:
+        for delay in _BACKOFF_SEQ:
+            try:
+                await self._open(entry.domain)
+                return
+            except Exception:
+                _logger.warning(
+                    "mcp reconnect attempt failed",
+                    extra={"event": "mcp.pool.reconnect_fail", "domain": entry.domain, "delay": delay},
+                )
+                await asyncio.sleep(delay)
+        raise MCPClientError(public=f"mcp {entry.domain} unreachable")
+
+    async def _close(self, entry: _SessionEntry) -> None:
+        stack = entry.stack
+        entry.session = None
+        entry.stack = None
+        if stack is not None:
+            try:
+                await stack.aclose()
+            except Exception:
+                _logger.exception(
+                    "mcp session close raised",
+                    extra={"event": "mcp.pool.close_fail", "domain": entry.domain},
+                )
+
+
+def _coerce_tool_result(domain: str, tool: str, result: Any) -> dict[str, Any]:
+    """Convert the SDK's call_tool result into a plain dict, applying the kind contract."""
+    # The SDK returns a CallToolResult with .content list of TextContent
+    contents = getattr(result, "content", None) or []
+    if not contents:
+        raise MCPClientError(public="empty tool response")
+    first = contents[0]
+    text = getattr(first, "text", None)
+    if text is None:
+        raise MCPClientError(public="non-text tool response")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise MCPClientError(public="malformed tool response") from exc
+
+    kind = payload.get("kind")
+    if kind == "business":
+        # Surface the message as a BusinessError so the agent can react (e.g. forbidden).
+        raise BusinessError(payload.get("error", "business error"))
+    if kind == "internal":
+        _logger.error(
+            "mcp returned internal error",
+            extra={"event": "mcp.tool.internal", "domain": domain, "tool": tool},
+        )
+        raise MCPClientError(public="upstream_internal_error")
+    return payload

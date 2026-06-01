@@ -1,4 +1,5 @@
-"""Shared utilities for every MCP server (Master Patch Part 1).
+"""Shared utilities for MCP servers: transport, auth, errors, db, redis, logging.
 
-Importable as `_common.<module>` once mcp-servers/ is on sys.path.
+NOT a domain. Domain MCPs (claims, policies, users, documents) must NOT import
+business logic from here — only infrastructure helpers (Rule 3).
 """

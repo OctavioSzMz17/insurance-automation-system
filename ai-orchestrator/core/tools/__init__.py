@@ -1,36 +1,34 @@
-"""LangChain @tool wrappers around the MCP server functions.
+"""Typed wrappers over the MCP client pool, one module per MCP domain.
 
-Rule 6 (HITL) enforcement: create_claim is NOT in any agent tool bundle.
-DB persistence is handled exclusively by the orchestrator FastAPI handler
-after the agent produces its TriageProposal — no autonomous mutations.
+This layer is the orchestrator-side contract with each MCP. The agent calls these
+functions; the LLM tool spec is generated from them. There is exactly ONE place where
+each tool's name, args, and signature live — change it here, and both the agent path
+and the LLM-facing schema move in lockstep.
 
-Exports:
-    DOCUMENTS_TOOLS  — PDF extraction (read-only)           [analyst + auditor]
-    LEGACY_TOOLS     — users + policies lookup (read-only)  [analyst + auditor]
-    REASONING_TOOLS  — deterministic coverage rules engine  [auditor only]
-
-Pre-built tool bundles:
-    READ_ONLY_TOOLS  = documents + legacy       (for analyst_agent)
-    AUDITOR_TOOLS    = READ_ONLY_TOOLS + reasoning engine (for auditor_agent)
+`core/tools/*` is NOT the MCP server. The MCP server is in `mcp-servers/<domain>/`.
+This module talks to it over SSE through the `MCPClientPool`.
 """
+from __future__ import annotations
 
-from .documents import DOCUMENTS_TOOLS
-from .legacy import LEGACY_TOOLS
-from .reasoning import REASONING_TOOLS
+from typing import Any
 
-READ_ONLY_TOOLS = [*DOCUMENTS_TOOLS, *LEGACY_TOOLS]
-# Auditor gets read tools + the deterministic rules engine.
-# create_claim is deliberately absent — Rule 6 HITL gate.
-AUDITOR_TOOLS   = [*READ_ONLY_TOOLS, *REASONING_TOOLS]
-
-# Back-compat alias for the analyst_agent — same as READ_ONLY_TOOLS
-ALL_TOOLS = READ_ONLY_TOOLS
+from . import claims, documents, policies, users
+from ._spec import (
+    ToolBinding,
+    build_tool_specs,
+    dispatch,
+    is_write_restricted,
+    split_tool_name,
+)
 
 __all__ = [
-    "DOCUMENTS_TOOLS",
-    "LEGACY_TOOLS",
-    "REASONING_TOOLS",
-    "READ_ONLY_TOOLS",
-    "AUDITOR_TOOLS",
-    "ALL_TOOLS",
+    "claims",
+    "documents",
+    "policies",
+    "users",
+    "ToolBinding",
+    "build_tool_specs",
+    "dispatch",
+    "is_write_restricted",
+    "split_tool_name",
 ]

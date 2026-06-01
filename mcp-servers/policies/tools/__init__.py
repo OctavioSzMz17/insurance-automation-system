@@ -1,2 +1,0 @@
-"""Policies MCP tools package."""
-

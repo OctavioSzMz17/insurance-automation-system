@@ -1,100 +1,49 @@
-"""JWT signing + verification.
+"""JWT signing + verification (Rule 7).
 
-Uses python-jose with HS256 by default. Secret + algorithm + expiry
-all come from Settings (.env).
-
-In production the orchestrator would NOT issue its own tokens — an IdP
-(Auth0, Cognito, Keycloak) would. We only need decode_jwt() in prod.
-The create_access_token() helper exists for tests and the dev-only
-POST /auth/token endpoint (Rule 7 / Rule 8).
+Uses python-jose HS256. All secrets come from OrchestratorSettings.
+create_access_token() is dev/test only — production uses an IdP.
+decode_jwt() is used in all environments.
 """
-
 from __future__ import annotations
 
-import sys
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
-
-import logging
 
 from fastapi import HTTPException, status
 from jose import JWTError, jwt
 
-logger = logging.getLogger(__name__)
-
-# Allow stand-alone imports
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from config import get_settings  # noqa: E402
-
+from config import get_settings
 from .roles import Role
 
+logger = logging.getLogger(__name__)
 
-def create_access_token(
-    sub:           str,
-    role:          Role,
-    expires_hours: int | None = None,
-) -> str:
-    """Build and sign a JWT for the given subject / role.
 
-    Args:
-        sub:           User identifier (e.g. "octav.admin"). Maps to JWT `sub`.
-        role:          One of Role.{ANALYST, AUDITOR, ADMIN}.
-        expires_hours: Lifetime in hours; defaults to JWT_EXPIRATION_HOURS.
-
-    Returns:
-        The signed JWT as a string.
-    """
+def create_access_token(sub: str, role: Role, expires_hours: int | None = None) -> str:
     settings = get_settings()
     now = datetime.now(timezone.utc)
     ttl = expires_hours if expires_hours is not None else settings.jwt_expiration_hours
 
     payload: dict[str, Any] = {
-        "sub":  sub,
+        "sub": sub,
         "role": role.value,
-        "jti":  str(uuid.uuid4()),   # Fix #69 — unique token ID for revocation
-        "iat":  int(now.timestamp()),
-        "exp":  int((now + timedelta(hours=ttl)).timestamp()),
+        "jti": str(uuid.uuid4()),
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(hours=ttl)).timestamp()),
     }
-
-    # Fix #93 — include aud/iss claims when they are configured in settings
-    # so tokens issued here pass decode_jwt()'s audience + issuer validation.
-    # In production an IdP issues tokens; this helper is dev/test only.
     if settings.jwt_audience:
         payload["aud"] = settings.jwt_audience
     if settings.jwt_issuer:
         payload["iss"] = settings.jwt_issuer
 
-    return jwt.encode(
-        payload,
-        settings.jwt_secret_key,
-        algorithm=settings.jwt_algorithm,
-    )
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
 def decode_jwt(token: str) -> dict[str, Any]:
-    """Verify and decode a JWT. Raises 401 on any failure.
-
-    Fix #65 — validates `aud` and `iss` claims when JWT_AUDIENCE /
-    JWT_ISSUER are configured in settings. Passing `audience` to
-    python-jose causes it to reject tokens whose `aud` doesn't match,
-    closing the cross-service token reuse vector.
-
-    Args:
-        token: The raw JWT string (without "Bearer ").
-
-    Returns:
-        The decoded payload dict.
-
-    Raises:
-        HTTPException(401): If the token is missing, expired, tampered,
-                            or signed with the wrong key / wrong aud/iss.
-    """
     settings = get_settings()
-    options: dict[str, Any] = {}
     audience = settings.jwt_audience or None
-    issuer   = settings.jwt_issuer   or None
+    issuer = settings.jwt_issuer or None
     try:
         return jwt.decode(
             token,
@@ -102,14 +51,9 @@ def decode_jwt(token: str) -> dict[str, Any]:
             algorithms=[settings.jwt_algorithm],
             audience=audience,
             issuer=issuer,
-            options=options,
         )
-    except JWTError as e:
-        # Fix #83 — never leak the raw JWTError message to the client.
-        # The detail string reveals *why* verification failed (expired,
-        # bad signature, wrong audience…), giving an attacker enumeration
-        # information.  Log internally at DEBUG; return a generic 401.
-        logger.debug("decode_jwt failed | reason=%s", e)
+    except JWTError as exc:
+        logger.debug("decode_jwt failed | reason=%s", exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token.",
