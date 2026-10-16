@@ -1,8 +1,9 @@
-"""Re-exposes the structured logger from _common so orchestrator code uses one logger.
+"""Re-exposes the canonical structured logger so orchestrator code uses one logger.
 
-Importing across the dash-named `mcp-servers` dir requires PYTHONPATH = mcp-servers in
-the runtime (the Dockerfile sets it; tests set it in conftest).
+The implementation lives in `observability/logging.py` (Rule 9). This bridge is kept so
+the existing `from core.logging_bridge import get_logger` call sites keep working; new
+code should import from `observability` directly.
 """
 from __future__ import annotations
 
-from _common.logging import configure, get_logger  # noqa: F401
+from observability.logging import configure, get_logger  # noqa: F401

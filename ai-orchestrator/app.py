@@ -32,6 +32,7 @@ from core.mcp_client import MCPClientPool
 from core.models import get_model
 from core.redis_bridge import dispose_redis, get_redis
 from middleware.rate_limit import RateLimitMiddleware
+from observability import configure_tracing, shutdown_tracing
 from middleware.trace_id import TraceIdMiddleware
 from routes.agent_router import router as agent_router
 from routes.auth import router as auth_router
@@ -59,6 +60,12 @@ async def lifespan(app: FastAPI):
     configure_logging(settings.log_level)
     settings.cross_validate()
 
+    tracer = configure_tracing(
+        settings.observability_backend,
+        environment=settings.environment,
+        mask_level=settings.observability_mask or None,
+    )
+
     pool = MCPClientPool(settings)
     await pool.start()
     llm = get_model(settings.analyst_model_tier)
@@ -78,7 +85,12 @@ async def lifespan(app: FastAPI):
 
     _logger.info(
         "orchestrator boot",
-        extra={"event": "orchestrator.boot", "tier": settings.analyst_model_tier, "model": llm.model},
+        extra={
+            "event": "orchestrator.boot",
+            "tier": settings.analyst_model_tier,
+            "model": llm.model,
+            "tracing": type(tracer).__name__,
+        },
     )
     try:
         yield
@@ -88,6 +100,8 @@ async def lifespan(app: FastAPI):
             await reaper_task
         await pool.stop()
         await dispose_redis()
+        # Last, so spans emitted while shutting down are included in the flush.
+        shutdown_tracing()
 
 
 # ── App ───────────────────────────────────────────────────────────────────────

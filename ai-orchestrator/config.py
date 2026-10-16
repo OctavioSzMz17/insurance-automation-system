@@ -79,6 +79,24 @@ class OrchestratorSettings(BaseSettings):
     mcp_client_key: str = Field(default="")    # MCP_CLIENT_KEY  — orchestrator.key
     mcp_ca_cert: str = Field(default="")       # MCP_CA_CERT     — ca.crt
 
+    # ── Observability (Rule 9) ───────────────────────────────────────────────
+    # Tracing backend(s): noop | log | recording | langfuse, comma-separated to
+    # compose them. Defaults to noop so a deployment that has not opted in pays nothing.
+    observability_backend: str = Field(default="noop")
+    # Redaction level: none | pii | strict. Empty means "decide from ENVIRONMENT",
+    # which is `pii` in production/staging and `none` in development.
+    observability_mask: str = Field(default="")
+
+    # Langfuse credentials. The SDK reads these from the environment itself; they are
+    # declared here so cross_validate() can refuse to boot a production deployment
+    # that believes it is traced but is not.
+    langfuse_public_key: str = Field(default="")
+    langfuse_secret_key: str = Field(default="")
+    langfuse_base_url: str = Field(default="")
+    # Self-hosted Langfuse only — consumed by the Langfuse containers, never by this
+    # service. Validated here because it lives in the same .env (Rule 8).
+    langfuse_encryption_key: str = Field(default="")
+
     # ── HTTP bind ────────────────────────────────────────────────────────────
     bind_host: str = Field(default="0.0.0.0")  # nosec B104
     bind_port: int = Field(default=8000, ge=1, le=65535)
@@ -134,6 +152,20 @@ class OrchestratorSettings(BaseSettings):
                 raise ValueError("JWT_SECRET_KEY must be ≥ 32 characters in production")
             if self.claim_upload_dir.startswith("/tmp"):
                 raise ValueError("CLAIM_UPLOAD_DIR must not be /tmp in production — use a persistent volume")
+            if "langfuse" in self.observability_backend.lower():
+                if not self.langfuse_public_key or not self.langfuse_secret_key:
+                    raise ValueError(
+                        "OBSERVABILITY_BACKEND includes langfuse but "
+                        "LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY are missing — a "
+                        "service must not run believing it is traced when it is not"
+                    )
+                # Rule 8: the placeholder key is 64 zeros, which would leave every
+                # secret in the Langfuse database encrypted with a published value.
+                if self.langfuse_encryption_key and set(self.langfuse_encryption_key) == {"0"}:
+                    raise ValueError(
+                        "LANGFUSE_ENCRYPTION_KEY is all zeros — generate one with "
+                        "`openssl rand -hex 32`"
+                    )
 
         for url_field in (self.mcp_claims_url, self.mcp_policies_url, self.mcp_users_url, self.mcp_documents_url):
             if not url_field.startswith(("http://", "https://")):
