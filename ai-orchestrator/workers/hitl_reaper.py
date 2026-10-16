@@ -24,12 +24,14 @@ from contextlib import suppress
 from redis.asyncio import Redis
 
 from core.mcp_client import MCPClientPool
+from core.service_identity import HITL_REAPER_SUB, SERVICE_ROLE
 from core.tools import dispatch
 
 _TRACKING_SET = "hitl:tracking"
 _TRACKING_DATA_PREFIX = "hitl:tracking:data:"
-_REAPER_SUB = "system:hitl_reaper"
-_REAPER_ROLE = "ADMIN"
+# Single source of truth for service principals — see core/service_identity.py.
+_REAPER_SUB = HITL_REAPER_SUB
+_REAPER_ROLE = SERVICE_ROLE
 _DEFAULT_INTERVAL = 60.0
 
 logger = logging.getLogger(__name__)
