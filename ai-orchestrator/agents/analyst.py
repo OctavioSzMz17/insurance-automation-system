@@ -33,7 +33,13 @@ from uuid import UUID
 
 from langgraph.graph import END, START, StateGraph
 
-from packages.common.exceptions import BusinessError, MCPClientError, ValidationFailure
+from observability import Span, SpanKind, get_tracer
+from packages.common.exceptions import (
+    BusinessError,
+    ForbiddenError,
+    MCPClientError,
+    ValidationFailure,
+)
 from packages.common.schemas.claim import ClaimProposal
 from packages.common.schemas.triage import TriageReport
 
@@ -42,14 +48,28 @@ from core.config_runtime import OrchestratorRuntimeView
 from core.logging_bridge import get_logger
 from core.mcp_client import MCPClientPool
 from core.models import LLMClient
-from core.prompts.analyst import SYSTEM_PROMPT
-from core.tools import build_tool_specs, split_tool_name
+from core.prompts.analyst import SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION
+from core.tools import build_tool_specs, dispatch, split_tool_name
 from core.validation import MAX_VALIDATION_RETRIES, validate_triage_payload
 
 _logger = get_logger(__name__)
 # Tolerant fence matcher: accepts ```json … ```, ```JSON … ``` or a bare ``` … ```
 # fence. The language tag is optional because smaller models routinely drop it.
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
+
+
+def _describe_turn(content_blocks: list[dict[str, Any]]) -> str:
+    """One-line summary of what the model did this step, for the trace.
+
+    Cheap to compute and it is the field that makes a trace readable at a glance:
+    "called documents__parse_pdf" tells you more than a token count.
+    """
+    tools = [b.get("name") for b in content_blocks if b.get("type") == "tool_use"]
+    if tools:
+        return "called " + ", ".join(str(t) for t in tools)
+    if any(b.get("type") == "text" for b in content_blocks):
+        return "emitted text"
+    return "emitted nothing"
 
 
 def _iter_balanced_objects(text: str):
@@ -162,23 +182,40 @@ class Analyst:
             "deadline": time.monotonic() + self._runtime.analyst_timeout_seconds,
             "validation_retries": 0,
         }
-        # recursion_limit must allow think_act → run_tools → think_act loops; we give it room.
-        final: AgentState = await self._graph.ainvoke(
-            initial, config={"recursion_limit": self._runtime.analyst_max_steps * 3 + 10}
-        )
-        status = final.get("outcome_status", "manual_review")
-        if status == "success":
-            return AnalystOutcome(
-                status="success",
-                triage=final.get("triage"),
-                proposal=final.get("proposal"),
-                steps_used=final.get("step", 0),
+        async with get_tracer().span(
+            "analyst.run",
+            pipeline_id=str(ctx.pipeline_id),
+            claimant_sub=claimant,
+            max_steps=self._runtime.analyst_max_steps,
+            timeout_seconds=self._runtime.analyst_timeout_seconds,
+            model=getattr(self._llm, "model", "unknown"),
+        ) as span:
+            # recursion_limit must allow think_act → run_tools → think_act loops; we give it room.
+            final: AgentState = await self._graph.ainvoke(
+                initial, config={"recursion_limit": self._runtime.analyst_max_steps * 3 + 10}
             )
-        return AnalystOutcome(
-            status="manual_review",
-            reason=final.get("reason", "unspecified"),
-            steps_used=final.get("step", 0),
-        )
+            status = final.get("outcome_status", "manual_review")
+            steps_used = final.get("step", 0)
+            span.set_attributes(outcome=status, steps_used=steps_used)
+
+            if status == "success":
+                triage = final.get("triage")
+                if triage is not None:
+                    span.set_attributes(
+                        severity=triage.severity.value,
+                        policy_id=str(triage.policy_id),
+                        reported_damage_amount=str(triage.reported_damage_amount),
+                    )
+                return AnalystOutcome(
+                    status="success",
+                    triage=triage,
+                    proposal=final.get("proposal"),
+                    steps_used=steps_used,
+                )
+
+            reason = final.get("reason", "unspecified")
+            span.set_status(False, message=reason)
+            return AnalystOutcome(status="manual_review", reason=reason, steps_used=steps_used)
 
     # ── graph construction ─────────────────────────────────────────────────
 
@@ -213,9 +250,26 @@ class Analyst:
         if state["step"] >= self._runtime.analyst_max_steps:
             return {"outcome_status": "manual_review", "reason": f"reached max_steps={self._runtime.analyst_max_steps}"}
 
-        turn = await self._llm.complete(
-            system=SYSTEM_PROMPT, messages=state["messages"], tools=self._tool_specs
-        )
+        async with get_tracer().span(
+            "analyst.think_act",
+            kind=SpanKind.GENERATION,
+            step=state["step"] + 1,
+            pipeline_id=state["pipeline_id"],
+        ) as span:
+            turn = await self._llm.complete(
+                system=SYSTEM_PROMPT, messages=state["messages"], tools=self._tool_specs
+            )
+            span.set_usage(
+                input_tokens=turn.input_tokens,
+                output_tokens=turn.output_tokens,
+                model=getattr(self._llm, "model", "unknown"),
+            )
+            span.set_attributes(
+                stop_reason=turn.stop_reason,
+                emitted=_describe_turn(turn.content_blocks),
+                prompt_version=SYSTEM_PROMPT_VERSION,
+            )
+
         _logger.info(
             "analyst step",
             extra={
@@ -240,6 +294,14 @@ class Analyst:
         return {"messages": state["messages"] + [{"role": "user", "content": results}]}
 
     async def _node_validate_sign(self, state: AgentState) -> dict[str, Any]:
+        async with get_tracer().span(
+            "analyst.validate",
+            pipeline_id=state["pipeline_id"],
+            retries_so_far=state["validation_retries"],
+        ) as span:
+            return self._validate_sign(state, span)
+
+    def _validate_sign(self, state: AgentState, span: Span) -> dict[str, Any]:
         last = state["messages"][-1]
         payload = self._extract_json(last["content"])
         if payload is None:
@@ -247,6 +309,8 @@ class Analyst:
             # number of chances to re-emit cleanly before escalating — small models
             # sometimes drop the fence on the first try.
             retries = state["validation_retries"] + 1
+            span.set_status(False, message="no structured report in the reply")
+            span.set_attributes(outcome="no_json", retries=retries)
             if retries > MAX_VALIDATION_RETRIES:
                 return {
                     "validation_retries": retries,
@@ -270,6 +334,8 @@ class Analyst:
             triage = validate_triage_payload(payload, pipeline_id=UUID(state["pipeline_id"]))
         except ValidationFailure as exc:
             retries = state["validation_retries"] + 1
+            span.set_status(False, message=str(exc))
+            span.set_attributes(outcome="invalid", retries=retries)
             if retries > MAX_VALIDATION_RETRIES:
                 return {
                     "validation_retries": retries,
@@ -289,6 +355,18 @@ class Analyst:
                 }],
             }
 
+        # The containment, made visible: whatever severity the model asked for, the
+        # stored one comes from the amount. Both land in the trace side by side.
+        claimed = payload.get("severity")
+        span.set_attributes(
+            outcome="signed",
+            severity_claimed=str(claimed) if claimed is not None else None,
+            severity_computed=triage.severity.value,
+            severity_overridden=claimed is not None and str(claimed) != triage.severity.value,
+            pipeline_id_claimed=str(payload.get("pipeline_id") or "") or None,
+            evidence_quotes=len(triage.evidence_quotes),
+        )
+
         signed = proposal_mod.build_proposal(
             pipeline_id=UUID(state["pipeline_id"]),
             actor="analyst",
@@ -302,12 +380,20 @@ class Analyst:
             "proposal": signed,
         }
 
-    def _node_escalate(self, state: AgentState) -> dict[str, Any]:
+    async def _node_escalate(self, state: AgentState) -> dict[str, Any]:
+        reason = state.get("reason", "unspecified")
+        async with get_tracer().span(
+            "analyst.escalate",
+            kind=SpanKind.EVENT,
+            pipeline_id=state["pipeline_id"],
+            steps=state.get("step", 0),
+        ) as span:
+            span.set_status(False, message=reason)
         _logger.warning(
             "analyst escalated to MANUAL_REVIEW",
             extra={
                 "event": "analyst.manual_review",
-                "reason": state.get("reason", "unspecified"),
+                "reason": reason,
                 "steps": state.get("step", 0),
             },
         )
@@ -356,12 +442,46 @@ class Analyst:
             extra={"event": "analyst.tool", "pipeline_id": state["pipeline_id"],
                    "domain": domain, "tool": mcp_tool},
         )
-        try:
-            result = await self._pool.call(domain, mcp_tool, args)
-        except BusinessError as exc:
-            return self._tool_error(tu, f"business: {exc}")
-        except MCPClientError as exc:
-            return self._tool_error(tu, exc.public)
+        async with get_tracer().span(
+            f"tool.{domain}.{mcp_tool}",
+            kind=SpanKind.TOOL,
+            domain=domain,
+            tool=mcp_tool,
+            pipeline_id=state["pipeline_id"],
+            # The identity on this call was imposed by the server, whatever the model
+            # asked for (Rule 7). Recorded so the trace shows the invariant holding.
+            identity_forced=True,
+            caller_sub=state["caller_sub"],
+            caller_role=state["caller_role"],
+        ) as span:
+            span.set_input({k: v for k, v in args.items()
+                            if k not in {"caller_sub", "caller_role"}})
+            try:
+                # Routed through the registry, never straight at the pool: dispatch is what
+                # enforces the write gate (Rule 4) and rejects names that are not registered
+                # tools. Hiding write tools from the tool spec is the first barrier; this is
+                # the second, and it is the one that holds when the model invents a name.
+                result = await dispatch(self._pool, tu["name"], args, allow_writes=False)
+            except ForbiddenError as exc:
+                _logger.warning(
+                    "analyst attempted a write-restricted tool",
+                    extra={"event": "analyst.write_refused", "pipeline_id": state["pipeline_id"],
+                           "tool": tu["name"]},
+                )
+                span.set_status(False, message=f"write refused: {exc}")
+                span.set_attributes(write_refused=True)
+                return self._tool_error(tu, f"forbidden: {exc}")
+            except ValueError as exc:
+                span.set_status(False, message=f"unknown tool: {exc}")
+                return self._tool_error(tu, f"unknown tool: {exc}")
+            except BusinessError as exc:
+                span.set_status(False, message=f"business: {exc}")
+                return self._tool_error(tu, f"business: {exc}")
+            except MCPClientError as exc:
+                span.set_status(False, message=exc.public)
+                return self._tool_error(tu, exc.public)
+
+            span.set_output(result)
 
         return {
             "type": "tool_result",

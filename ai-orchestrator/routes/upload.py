@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, stat
 
 from auth import Role, UserPrincipal, require_role
 from config import get_settings
+from observability import get_tracer
 from packages.common.schemas.api import UploadResponse
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,14 @@ async def submit_upload(
     dest.write_bytes(content)
 
     sha256 = hashlib.sha256(content).hexdigest()
+    async with get_tracer().trace(
+        "claim.upload",
+        session_id=str(pipeline_id),
+        pipeline_id=str(pipeline_id),
+        operator_sub=user.sub,
+    ) as span:
+        span.set_attributes(bytes=len(content), sha256_12=sha256[:12],
+                            content_type=content_type or "unset")
     logger.info(
         "upload accepted | pipeline_id=%s size=%d sha256=%s sub=%s",
         pipeline_id, len(content), sha256[:16], user.sub,
