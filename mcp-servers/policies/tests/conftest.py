@@ -25,6 +25,8 @@ from scripts.seed.fixtures import (  # noqa: E402
     ADMIN_SUB,
     ANALYST_ID,
     ANALYST_SUB,
+    JUAN_ID,
+    JUAN_SUB,
     POLICY_AUTO_ID,
     POLICY_HOME_ID,
 )
@@ -64,15 +66,22 @@ def db_conn():
 
 @pytest.fixture
 def other_user_with_policy(db_conn):
-    """Insert a second user + a policy they own. Used to test cross-tenant denial."""
+    """Insert a second CLIENT plus a policy they own, to test cross-tenant denial.
+
+    Migration 0004 renamed the owning table to `clients` and `policies.user_id` to
+    `policies.client_id`. The repository still aliases the column back to `user_id`
+    in its SELECT output, so only the inserts change here — the tool contract did not.
+
+    The yielded keys keep their original names for the same reason.
+    """
     from datetime import date
 
     with db_conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO users (email, role, full_name)
-            VALUES ('victim@example.com', 'ANALYST', 'Vic Tim')
-            ON CONFLICT (email) DO UPDATE SET role = EXCLUDED.role
+            INSERT INTO clients (email, full_name)
+            VALUES ('victim@example.com', 'Vic Tim')
+            ON CONFLICT (email) DO UPDATE SET full_name = EXCLUDED.full_name
             RETURNING id::text, email
             """,
         )
@@ -80,7 +89,7 @@ def other_user_with_policy(db_conn):
         cur.execute(
             """
             INSERT INTO policies
-                (user_id, status, deductible_usd, coverage_limit_usd, effective_from, effective_to, coverage_rules)
+                (client_id, status, deductible_usd, coverage_limit_usd, effective_from, effective_to, coverage_rules)
             VALUES (%s, 'ACTIVE', 250.00, 10000.00, %s, %s, '[]'::jsonb)
             RETURNING id::text
             """,
@@ -91,7 +100,7 @@ def other_user_with_policy(db_conn):
     yield {"user_id": user_id, "user_email": user_email, "policy_id": policy_id}
     with db_conn.cursor() as cur:
         cur.execute("DELETE FROM policies WHERE id = %s", (policy_id,))
-        cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+        cur.execute("DELETE FROM clients WHERE id = %s", (user_id,))
     db_conn.commit()
 
 
@@ -103,4 +112,8 @@ def fixture_ids():
         "analyst_id": ANALYST_ID,
         "policy_auto_id": POLICY_AUTO_ID,
         "policy_home_id": POLICY_HOME_ID,
+        # The seeded policies belong to a client, so the owner-reads-own-policy path
+        # needs that client's identity, not a staff one.
+        "client_sub": JUAN_SUB,
+        "client_id": JUAN_ID,
     }

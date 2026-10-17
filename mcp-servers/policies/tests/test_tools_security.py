@@ -24,12 +24,17 @@ def _wrap(handler):
 # ── happy path ──────────────────────────────────────────────────────────────
 
 
-async def test_analyst_reads_own_policy(fixture_ids):
+async def test_owner_reads_own_policy(fixture_ids):
+    """Non-ADMIN callers may read a policy only when they own it.
+
+    The seeded policies belong to a client (migration 0004), so ownership is asserted
+    with that client's sub — an analyst does not own anything here.
+    """
     tools = _build_tools_map()
     res = await _wrap(tools["get_policy_by_id"].handler)(
         {
             "policy_id": str(fixture_ids["policy_auto_id"]),
-            "caller_sub": fixture_ids["analyst_sub"],
+            "caller_sub": fixture_ids["client_sub"],
             "caller_role": "ANALYST",
         }
     )
@@ -114,7 +119,7 @@ async def test_coverage_rules_returns_jsonb(fixture_ids):
     res = await _wrap(tools["get_coverage_rules"].handler)(
         {
             "policy_id": str(fixture_ids["policy_auto_id"]),
-            "caller_sub": fixture_ids["analyst_sub"],
+            "caller_sub": fixture_ids["client_sub"],
             "caller_role": "ANALYST",
         }
     )
