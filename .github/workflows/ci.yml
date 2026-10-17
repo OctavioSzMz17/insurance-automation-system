@@ -1,0 +1,316 @@
+name: CI
+
+# Every job here is blocking. A pipeline with advisory jobs teaches everyone to
+# ignore the red ones, so anything that cannot be green today is either fixed or
+# left out with a written reason — never left yellow.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+# A new push supersedes the previous run on the same ref. Without this, pushing
+# three times in a minute pays for three full pipelines and the first two tell you
+# nothing you still care about.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 3.12 because that is what the container images run. Testing on the runner's
+  # default Python would validate an environment nobody deploys.
+  PYTHON_VERSION: "3.12"
+
+jobs:
+
+  # ── Static analysis ─────────────────────────────────────────────────────────
+  lint:
+    name: lint & types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      # Mirrors infra/docker/Dockerfile.mcp-base exactly: the local package cannot
+      # carry a hash, so it is installed first and alone; everything else is
+      # verified against the lock. Installing any other way would mean CI validates
+      # a dependency set that production never uses.
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-deps -e ./packages/common
+          pip install --require-hashes --no-deps -r requirements-dev.txt
+
+      - name: ruff
+        run: ruff check --no-cache .
+
+      # Scoped to the packages that are clean today rather than the whole tree.
+      # `ai-orchestrator/` cannot be checked yet: the directory name contains a dash
+      # and carries an __init__.py, so mypy rejects it as a package name. Resolving
+      # that is a layout change, not a CI change.
+      - name: mypy
+        run: mypy observability packages/common
+
+      # The architecture diagrams are generated from the compiled LangGraph graphs.
+      # This fails if someone changed a graph and did not regenerate them, which is
+      # the only way to keep a committed diagram honest.
+      - name: architecture diagrams are current
+        run: python -m scripts.docs.export_graphs --check
+
+  # ── Unit and integration tests ──────────────────────────────────────────────
+  test:
+    name: tests (orchestrator)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-deps -e ./packages/common
+          pip install --require-hashes --no-deps -r requirements-dev.txt
+
+      - name: pytest
+        env:
+          # No .env exists in CI. The orchestrator suites need no database: the
+          # agents are driven by stub models and a fake MCP pool.
+          ANTHROPIC_API_KEY: sk-test-not-a-real-key
+        run: pytest ai-orchestrator/tests evals -q
+
+  # ── The adversarial suite, scored ───────────────────────────────────────────
+  evals:
+    name: adversarial containment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-deps -e ./packages/common
+          pip install --require-hashes --no-deps -r requirements-dev.txt
+
+      # The runner exits non-zero on any failure that is not a declared known gap,
+      # so the containment rate is a build gate and not a vanity metric. Revert the
+      # mutation gate or the ownership check and this job names the exact case.
+      - name: run suite
+        run: python -m evals.runner --report
+
+      # Puts the scoreboard directly on the Actions run page — the number is the
+      # point, and a number nobody sees is a number nobody defends.
+      - name: publish report
+        if: always()
+        run: cat evals/.artifacts/REPORT.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report
+          path: |
+            evals/.artifacts/REPORT.md
+            evals/.artifacts/results.json
+          retention-days: 30
+
+  # ── MCP suites, which need a real database ──────────────────────────────────
+  mcp-tests:
+    name: tests (MCP servers)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: insurance
+          POSTGRES_PASSWORD: insurance_local_password
+          POSTGRES_DB: insurance
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U insurance -d insurance"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+
+    env:
+      # Set explicitly, and this matters beyond CI: the MCP conftests call
+      # load_dotenv(.env) and their fixtures seed and mutate whatever DATABASE_URL
+      # points at. Run these locally without an explicit DATABASE_URL and they will
+      # happily reseed your real database.
+      DATABASE_URL: postgresql://insurance:insurance_local_password@localhost:5432/insurance
+      REDIS_URL: redis://localhost:6379/0
+      MCP_SHARED_SECRET: ci-test-shared-secret-at-least-32-chars-long
+      CLAIM_UPLOAD_DIR: ./data/uploads
+      MCP_DOMAIN: claims
+      ENVIRONMENT: development
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-deps -e ./packages/common
+          pip install --require-hashes --no-deps -r requirements-dev.txt
+
+      # Running the full chain from an empty database on every PR also makes the
+      # migrations themselves a tested artifact, not just the code above them.
+      - name: migrate
+        run: python -m alembic upgrade head
+
+      - name: pytest
+        run: |
+          mkdir -p data/uploads
+          pytest mcp-servers -q
+
+  # ── Security ────────────────────────────────────────────────────────────────
+  security:
+    name: security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-deps -e ./packages/common
+          pip install --require-hashes --no-deps -r requirements-dev.txt
+
+      # -ll reports medium and high only. Low is almost entirely asserts and
+      # subprocess calls that are fine here, and a gate that cries wolf is not a gate.
+      # The repository's existing `# nosec BXXX` markers are honoured.
+      - name: bandit
+        run: bandit -r ai-orchestrator mcp-servers packages observability scripts -ll -x '*/tests/*,*/test_*.py'
+
+      # Audits the locked set — the exact versions the images install.
+      #
+      # The six ignored advisories are all in langgraph and its satellites, and every
+      # one of them is fixed only in langgraph 1.x. requirements.in bounds it at
+      # `>=0.2,<1`, so raising it is a major-version bump of the framework the analyst
+      # and auditor graphs are built on — its own change, with its own verification
+      # run of the adversarial suite, not a line slipped into a CI commit.
+      #
+      # Listing the IDs rather than dropping the check keeps the exception auditable:
+      # anything NEW still fails this job, and removing an entry is a visible diff.
+      # Re-check with: pip-audit -r requirements.txt --no-deps
+      - name: pip-audit
+        run: |
+          pip-audit -r requirements.txt --no-deps \
+            --ignore-vuln PYSEC-2026-83 \
+            --ignore-vuln PYSEC-2026-2573 \
+            --ignore-vuln PYSEC-2026-2574 \
+            --ignore-vuln PYSEC-2026-2194 \
+            --ignore-vuln PYSEC-2026-2575 \
+            --ignore-vuln PYSEC-2026-4240
+
+      # Secrets must never reach the history. .env is gitignored, but a `git add -f`
+      # or a rename slips past that, and this costs a second.
+      - name: no committed secrets
+        run: |
+          if git ls-files --error-unmatch .env 2>/dev/null; then
+            echo "::error::.env is tracked by git — remove it from the index and rotate every value in it"
+            exit 1
+          fi
+          tracked=$(git ls-files '*.pem' '*.key' | grep -v '^scripts/certs/' || true)
+          if [ -n "$tracked" ]; then
+            echo "::error::private key material is tracked: $tracked"
+            exit 1
+          fi
+
+  # ── The lockfiles must match their sources (Rule 12) ────────────────────────
+  lockfile:
+    name: lockfile in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # Recompiles from the .in sources and fails if the result differs from what is
+      # committed. The runner is ubuntu + 3.12, the same target as the images, so the
+      # wheel hashes it produces are the ones Docker will verify.
+      - name: recompile and compare
+        run: bash scripts/security/compile_requirements.sh
+
+      - name: diff
+        run: |
+          if ! git diff --exit-code -- requirements.txt requirements-dev.txt; then
+            echo "::error::the lockfiles do not match requirements*.in — run scripts/security/compile_requirements.sh and commit the result"
+            exit 1
+          fi
+
+  # ── Container images ────────────────────────────────────────────────────────
+  build:
+    name: images build
+    runs-on: ubuntu-latest
+    # Gated on the lockfile because the images install from it with --require-hashes.
+    # A stale lock means an eight-minute build that fails for a reason the one-minute
+    # job already reported.
+    needs: [lockfile]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The per-MCP images are FROM insurance-mcp-base, and `base` sits behind a
+      # build-only profile, so it has to be built first and by name.
+      - name: build the shared base
+        run: docker compose --profile build-only build base
+
+      - name: build every service
+        run: docker compose build
+
+  # ── Single required check ───────────────────────────────────────────────────
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [lint, test, evals, mcp-tests, security, lockfile, build]
+    steps:
+      # Branch protection points at this one job, so adding or renaming a job above
+      # never means revisiting the repository settings. `needs` alone is not enough:
+      # with `if: always()` a skipped or failed dependency would otherwise pass.
+      - name: verify every job succeeded
+        run: |
+          results='${{ join(needs.*.result, " ") }}'
+          echo "upstream results: $results"
+          for r in $results; do
+            if [ "$r" != "success" ]; then
+              echo "::error::a required job did not succeed ($results)"
+              exit 1
+            fi
+          done
