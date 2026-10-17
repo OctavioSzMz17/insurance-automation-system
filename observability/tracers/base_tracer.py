@@ -78,7 +78,9 @@ class SpanRecord:
         return self._duration_ms
 
     def as_dict(self) -> dict[str, Any]:
-        payload = {
+        # Annotated, not inferred: without this mypy narrows the value type from the
+        # literal below and then rejects appending the scores list.
+        payload: dict[str, Any] = {
             "trace_id": self.trace_id,
             "span_id": self.span_id,
             "parent_id": self.parent_id,
