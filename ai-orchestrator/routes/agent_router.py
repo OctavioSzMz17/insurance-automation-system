@@ -20,9 +20,8 @@ from agents.mutation_handler import ApprovalContext
 from auth import Role, UserPrincipal, require_role
 from core import proposal as proposal_mod
 from core.hitl import HITLStore
-from core.tools import dispatch
 from core.service_identity import verification_identity
-from observability import Span, SpanKind, get_tracer
+from core.tools import dispatch
 from core.verification import (
     build_review_flags,
     evaluate_amount,
@@ -31,6 +30,7 @@ from core.verification import (
     evaluate_policy_ownership,
     unverified,
 )
+from observability import Span, SpanKind, get_tracer
 from packages.common.exceptions import ForbiddenError, NotFoundError
 from packages.common.schemas.claim import ClaimDecision, ClaimProposal
 from packages.common.schemas.rehydrate import from_stored
@@ -475,7 +475,7 @@ async def _audit(
             str(req.proposal_id), caller_sub=user.sub, caller_role=user.role.value
         )
     except (NotFoundError, ForbiddenError) as exc:
-        raise HTTPException(status_code=404 if isinstance(exc, NotFoundError) else 403, detail=str(exc))
+        raise HTTPException(status_code=404 if isinstance(exc, NotFoundError) else 403, detail=str(exc)) from exc
 
     # Rehydrated non-strictly: these came back from Redis as JSON, so UUIDs, timestamps
     # and decimals are strings. Field constraints are still enforced — see from_stored.
@@ -493,7 +493,7 @@ async def _audit(
             key=app_state.settings.hmac_proposal_key,
         )
     except ValidationFailure as exc:
-        raise HTTPException(status_code=400, detail=f"proposal verification failed: {exc}")
+        raise HTTPException(status_code=400, detail=f"proposal verification failed: {exc}") from exc
 
     audit_req = AuditRequest(
         pipeline_id=proposal.pipeline_id,
@@ -622,7 +622,7 @@ async def proposal_detail(
             proposal=stored.get("proposal"),
         )
     except ForbiddenError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except NotFoundError:
         pass  # expired or not a proposal id → try the durable store
 
@@ -634,7 +634,7 @@ async def proposal_detail(
         )
         claim = res.get("claim") or {}
     except (NotFoundError, ForbiddenError):
-        raise HTTPException(status_code=404, detail="proposal not found or expired")
+        raise HTTPException(status_code=404, detail="proposal not found or expired") from None
     if not claim:
         raise HTTPException(status_code=404, detail="proposal not found or expired")
 
@@ -695,7 +695,7 @@ async def _confirm(
             str(req.decision_id), caller_sub=user.sub, caller_role=user.role.value
         )
     except (NotFoundError, ForbiddenError) as exc:
-        raise HTTPException(status_code=404 if isinstance(exc, NotFoundError) else 403, detail=str(exc))
+        raise HTTPException(status_code=404 if isinstance(exc, NotFoundError) else 403, detail=str(exc)) from exc
 
     pipeline_id = (stored.get("analyst_triage") or {}).get("pipeline_id")
     if pipeline_id:

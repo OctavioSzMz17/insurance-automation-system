@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import logging
 
+from config import get_settings
 from fastapi import APIRouter, Request, Response, status
 
-from config import get_settings
 from packages.common.schemas.api import HealthResponse, ReadinessResponse
 
 logger = logging.getLogger(__name__)

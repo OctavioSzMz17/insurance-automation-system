@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -150,7 +151,9 @@ class OrchestratorSettings(BaseSettings):
                 raise ValueError("JWT_SECRET_KEY must be set to a strong secret in production")
             if len(self.jwt_secret_key) < 32:
                 raise ValueError("JWT_SECRET_KEY must be ≥ 32 characters in production")
-            if self.claim_upload_dir.startswith("/tmp"):
+            # The /tmp literal here REJECTS upload dirs under /tmp; nothing is written
+            # to it. Same rationale as _common/settings.validate_upload_dir.
+            if self.claim_upload_dir.startswith("/tmp"):  # nosec B108
                 raise ValueError("CLAIM_UPLOAD_DIR must not be /tmp in production — use a persistent volume")
             if "langfuse" in self.observability_backend.lower():
                 if not self.langfuse_public_key or not self.langfuse_secret_key:

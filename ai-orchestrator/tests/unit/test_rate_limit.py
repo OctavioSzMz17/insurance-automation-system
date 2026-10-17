@@ -1,23 +1,26 @@
 """Unit tests for middleware/rate_limit.py — sliding window logic + middleware."""
 from __future__ import annotations
 
-import asyncio
 import time
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from middleware.rate_limit import RateLimitMiddleware, _peek_jwt_sub, _rate_key, check_sliding_window
-
+from middleware.rate_limit import (
+    RateLimitMiddleware,
+    _peek_jwt_sub,
+    check_sliding_window,
+)
 
 # ── _peek_jwt_sub ─────────────────────────────────────────────────────────────
 
 def test_peek_valid_jwt_returns_sub():
     # Craft a minimal JWT payload without signing
-    import base64, json
+    import base64
+    import json
     payload = base64.urlsafe_b64encode(json.dumps({"sub": "alice", "role": "analyst"}).encode()).rstrip(b"=").decode()
     fake_token = f"header.{payload}.signature"
     assert _peek_jwt_sub(fake_token) == "alice"
@@ -30,7 +33,8 @@ def test_peek_invalid_jwt_returns_none():
 
 
 def test_peek_jwt_without_sub_returns_none():
-    import base64, json
+    import base64
+    import json
     payload = base64.urlsafe_b64encode(json.dumps({"role": "analyst"}).encode()).rstrip(b"=").decode()
     fake_token = f"header.{payload}.signature"
     assert _peek_jwt_sub(fake_token) is None
@@ -173,7 +177,8 @@ def test_middleware_fail_open_on_redis_error():
 
 def test_middleware_uses_sub_from_jwt():
     """Requests with different JWT subs have independent rate limits."""
-    import base64, json as _json
+    import base64
+    import json as _json
 
     def _jwt_for(sub: str) -> str:
         payload = base64.urlsafe_b64encode(

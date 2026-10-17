@@ -27,6 +27,7 @@ from uuid import UUID, uuid4
 
 from _common.acl import assert_admin_or_self_user, is_admin
 from documents import repository as doc_repo
+from evals.catalog import World, client_as_row, policy_as_row
 from packages.common.exceptions import (
     BusinessError,
     DomainError,
@@ -34,8 +35,6 @@ from packages.common.exceptions import (
     MCPClientError,
     NotFoundError,
 )
-
-from evals.catalog import World, client_as_row, policy_as_row
 
 Phase = Literal["agent", "verification", "mutation"]
 

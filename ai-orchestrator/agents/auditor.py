@@ -28,12 +28,6 @@ from uuid import UUID
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
-from observability import SpanKind, get_tracer
-
-from packages.common.exceptions import BusinessError, ForbiddenError, MCPClientError
-from packages.common.schemas.claim import ClaimDecision, ClaimProposal
-from packages.common.schemas.triage import TriageReport
-
 from core import proposal as proposal_mod
 from core.config_runtime import OrchestratorRuntimeView
 from core.logging_bridge import get_logger
@@ -41,6 +35,10 @@ from core.mcp_client import MCPClientPool
 from core.models import LLMClient
 from core.prompts.auditor import SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION
 from core.tools import build_tool_specs, dispatch, split_tool_name
+from observability import SpanKind, get_tracer
+from packages.common.exceptions import BusinessError, ForbiddenError, MCPClientError
+from packages.common.schemas.claim import ClaimDecision, ClaimProposal
+from packages.common.schemas.triage import TriageReport
 
 _logger = get_logger(__name__)
 _JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)

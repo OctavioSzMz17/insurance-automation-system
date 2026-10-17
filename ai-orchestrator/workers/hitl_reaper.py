@@ -19,7 +19,6 @@ import asyncio
 import json
 import logging
 import time
-from contextlib import suppress
 
 from redis.asyncio import Redis
 

@@ -8,7 +8,6 @@ import pytest
 from auth.roles import Role
 from auth.stream_tickets import StreamTicket, StreamTicketStore, TicketQuotaExceeded
 
-
 # ── In-memory backend (no Redis) ──────────────────────────────────────────────
 
 

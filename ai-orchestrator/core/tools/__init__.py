@@ -10,8 +10,6 @@ This module talks to it over SSE through the `MCPClientPool`.
 """
 from __future__ import annotations
 
-from typing import Any
-
 from . import claims, documents, policies, users
 from ._spec import (
     ToolBinding,

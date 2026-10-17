@@ -10,8 +10,6 @@ Coverage (Rule 5 required test matrix):
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from _common.settings import MCPSettings

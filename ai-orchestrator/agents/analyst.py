@@ -33,6 +33,14 @@ from uuid import UUID
 
 from langgraph.graph import END, START, StateGraph
 
+from core import proposal as proposal_mod
+from core.config_runtime import OrchestratorRuntimeView
+from core.logging_bridge import get_logger
+from core.mcp_client import MCPClientPool
+from core.models import LLMClient
+from core.prompts.analyst import SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION
+from core.tools import build_tool_specs, dispatch, split_tool_name
+from core.validation import MAX_VALIDATION_RETRIES, validate_triage_payload
 from observability import Span, SpanKind, get_tracer
 from packages.common.exceptions import (
     BusinessError,
@@ -42,15 +50,6 @@ from packages.common.exceptions import (
 )
 from packages.common.schemas.claim import ClaimProposal
 from packages.common.schemas.triage import TriageReport
-
-from core import proposal as proposal_mod
-from core.config_runtime import OrchestratorRuntimeView
-from core.logging_bridge import get_logger
-from core.mcp_client import MCPClientPool
-from core.models import LLMClient
-from core.prompts.analyst import SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION
-from core.tools import build_tool_specs, dispatch, split_tool_name
-from core.validation import MAX_VALIDATION_RETRIES, validate_triage_payload
 
 _logger = get_logger(__name__)
 # Tolerant fence matcher: accepts ```json … ```, ```JSON … ``` or a bare ``` … ```

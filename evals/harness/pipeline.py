@@ -13,13 +13,12 @@ from typing import Any
 from uuid import UUID
 
 from auth import Role, UserPrincipal
-from routes import agent_router
-
 from evals.cases import Case
 from evals.catalog import World
 from evals.harness.app import InMemoryHITL, RuntimeView, ScopedPool, build_request
 from evals.harness.fake_mcp import RecordingMCPPool
 from evals.harness.llm import CompromisedAnalystLLM, CompromisedAuditorLLM
+from routes import agent_router
 
 
 @dataclass

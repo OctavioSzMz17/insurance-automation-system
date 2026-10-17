@@ -22,17 +22,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from packages.common.exceptions import BusinessError, ForbiddenError, MCPClientError
-from packages.common.schemas.claim import ClaimDecision, ClaimProposal
-from packages.common.schemas.triage import TriageReport
-
 from core import proposal as proposal_mod
 from core.config_runtime import OrchestratorRuntimeView
 from core.logging_bridge import get_logger
 from core.mcp_client import MCPClientPool
 from core.service_identity import verification_identity
 from core.tools import dispatch
-from observability import get_tracer
 from core.verification import (
     build_review_flags,
     evaluate_amount,
@@ -41,6 +36,10 @@ from core.verification import (
     evaluate_policy_ownership,
     unverified,
 )
+from observability import get_tracer
+from packages.common.exceptions import BusinessError, ForbiddenError, MCPClientError
+from packages.common.schemas.claim import ClaimDecision, ClaimProposal
+from packages.common.schemas.triage import TriageReport
 
 _logger = get_logger(__name__)
 

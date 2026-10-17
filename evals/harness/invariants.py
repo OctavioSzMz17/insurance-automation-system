@@ -23,11 +23,10 @@ from core import proposal as proposal_mod
 from core import severity as severity_mod
 from core.tools import is_write_restricted
 from core.verification import build_review_flags
-from packages.common.exceptions import ValidationFailure
-from packages.common.schemas.claim import ClaimProposal
-
 from evals.harness.app import RuntimeView
 from evals.harness.pipeline import CaseRun
+from packages.common.exceptions import ValidationFailure
+from packages.common.schemas.claim import ClaimProposal
 
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SUMMARY_MAX = 200

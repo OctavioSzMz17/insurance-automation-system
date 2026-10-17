@@ -14,9 +14,8 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
-from packages.common.exceptions import ForbiddenError, NotFoundError
-
 from evals.harness.fake_mcp import Phase, RecordingMCPPool
+from packages.common.exceptions import ForbiddenError, NotFoundError
 
 
 class ScopedPool:

@@ -14,7 +14,6 @@ from sqlalchemy import text
 from _common.db import get_engine
 from packages.common.exceptions import NotFoundError
 
-
 # A policy is owned by a CLIENT (insured customer). The client_id column keeps
 # the output alias `user_id` so the orchestrator tool contract is unchanged.
 _SELECT_POLICY_WITH_OWNER = text(

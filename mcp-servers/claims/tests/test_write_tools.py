@@ -11,10 +11,6 @@ Covers (Rule 4, 5, 6, 7):
 """
 from __future__ import annotations
 
-import json
-import os
-from uuid import UUID
-
 import pytest
 
 from _common.settings import MCPSettings

@@ -21,10 +21,10 @@ import logging
 from pathlib import Path
 from uuid import uuid4
 
+from config import get_settings
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
 
 from auth import Role, UserPrincipal, require_role
-from config import get_settings
 from observability import get_tracer
 from packages.common.schemas.api import UploadResponse
 

@@ -19,7 +19,6 @@ import json
 from typing import Any
 
 from core.models import LLMTurn
-
 from evals.cases import Case
 
 _DEFAULT_SUMMARY = "Colision frontal con danos en cofre, salpicadera y faro delantero."

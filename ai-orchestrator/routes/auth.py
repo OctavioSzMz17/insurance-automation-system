@@ -9,11 +9,11 @@ from __future__ import annotations
 import logging
 import time
 
+from config import get_settings
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from auth import Role, create_access_token, decode_jwt
-from config import get_settings
 from packages.common.schemas.api import TokenRequest, TokenResponse
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ async def issue_dev_token(body: TokenRequest) -> TokenResponse:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unknown role {body.role!r}. Valid: analyst, auditor, admin",
-        )
+        ) from None
 
     token = create_access_token(sub=body.sub, role=role)
     logger.info("Dev token issued | sub=%s role=%s", body.sub, role.value)
@@ -113,7 +113,7 @@ async def revoke_user_tokens(
     try:
         caller_role = Role(caller_role_str)
     except ValueError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid role claim")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid role claim") from None
 
     if caller_role != Role.ADMIN:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
@@ -133,6 +133,6 @@ async def revoke_user_tokens(
         logger.info("revoke-user | sub=%s revoked_before=%d caller=%s", sub, now_ts, payload.get("sub"))
     except Exception as exc:
         logger.error("revoke-user | Redis error | sub=%s err=%s", sub, exc)
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Failed to persist revocation")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Failed to persist revocation") from exc
 
     return {"status": "revoked", "sub": sub, "revoked_before": str(now_ts)}

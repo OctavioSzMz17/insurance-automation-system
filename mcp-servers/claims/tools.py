@@ -29,7 +29,6 @@ from packages.common.exceptions import ForbiddenError
 
 from . import repository as repo
 
-
 _TERMINAL_STATUSES = frozenset({"APPROVED", "REJECTED", "MANUAL_REVIEW"})
 _VALID_NEW_STATUSES = frozenset({
     "SUBMITTED", "AWAITING_INPUT", "UNDER_REVIEW", "APPROVED", "REJECTED", "MANUAL_REVIEW",

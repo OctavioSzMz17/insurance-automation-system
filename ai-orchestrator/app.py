@@ -17,6 +17,7 @@ import asyncio
 import os
 from contextlib import asynccontextmanager, suppress
 
+from config import get_settings
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -24,7 +25,6 @@ from agents.analyst import Analyst
 from agents.auditor import Auditor
 from agents.mutation_handler import MutationHandler
 from auth.stream_tickets import StreamTicketStore
-from config import get_settings
 from core.hitl import HITLStore
 from core.logging_bridge import configure as configure_logging
 from core.logging_bridge import get_logger
@@ -32,8 +32,8 @@ from core.mcp_client import MCPClientPool
 from core.models import get_model
 from core.redis_bridge import dispose_redis, get_redis
 from middleware.rate_limit import RateLimitMiddleware
-from observability import configure_tracing, shutdown_tracing
 from middleware.trace_id import TraceIdMiddleware
+from observability import configure_tracing, shutdown_tracing
 from routes.agent_router import router as agent_router
 from routes.auth import router as auth_router
 from routes.health import router as health_router

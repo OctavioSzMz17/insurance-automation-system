@@ -1,7 +1,6 @@
 """Integration tests for the analyst ReAct loop with stubbed LLM + MCP pool."""
 from __future__ import annotations
 
-import time
 from uuid import uuid4
 
 import pytest
