@@ -17,9 +17,14 @@ def _resolve_dsn() -> str:
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         raise RuntimeError("DATABASE_URL is not set; refusing to run migrations")
-    # Alembic uses the sync driver. If the runtime DSN is asyncpg, swap it.
-    if dsn.startswith("postgresql+asyncpg://"):
-        dsn = dsn.replace("postgresql+asyncpg://", "postgresql://", 1)
+    # Alembic uses the sync driver, and the driver is named explicitly rather than
+    # left to SQLAlchemy's default. SQLAlchemy 2.1 changed what bare `postgresql://`
+    # resolves to — psycopg (v3) instead of psycopg2 — and requirements.in allows
+    # `SQLAlchemy>=2.0,<3`, so a future lock regeneration would otherwise break
+    # migrations with `ModuleNotFoundError: No module named 'psycopg'`.
+    for prefix in ("postgresql+asyncpg://", "postgresql://"):
+        if dsn.startswith(prefix):
+            return "postgresql+psycopg2://" + dsn[len(prefix):]
     return dsn
 
 
