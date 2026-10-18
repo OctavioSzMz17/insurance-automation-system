@@ -310,7 +310,7 @@ jobs:
       # with `if: always()` a skipped or failed dependency would otherwise pass.
       - name: verify every job succeeded
         run: |
-          results='${{ join(needs.*.result, " ") }}'
+          results="${{ join(needs.*.result, ' ') }}"
           echo "upstream results: $results"
           for r in $results; do
             if [ "$r" != "success" ]; then
