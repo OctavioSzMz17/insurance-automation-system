@@ -296,7 +296,11 @@ jobs:
 
   # ── Single required check ───────────────────────────────────────────────────
   ci:
-    name: ci
+    # Displayed as "CI", which is the exact string to add as the required status
+    # check in branch protection. Required checks match the *job* name, not the
+    # workflow name, and the match is case-sensitive — a ruleset asking for "CI"
+    # while the job reports "ci" waits forever for a check nobody sends.
+    name: CI
     runs-on: ubuntu-latest
     if: always()
     needs: [lint, test, evals, mcp-tests, security, lockfile, build]
