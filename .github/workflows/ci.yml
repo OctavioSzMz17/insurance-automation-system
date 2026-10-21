@@ -286,6 +286,18 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
+      # Five services declare `env_file: .env`, and Compose refuses to parse the file
+      # at all when it is missing — before it gets anywhere near a build. `.env` is
+      # gitignored, so CI never has one.
+      #
+      # Copying the committed example rather than marking the env_file optional is
+      # deliberate: `docker compose up` *should* fail loudly when there is no
+      # configuration, and weakening that to make a build job pass would trade a
+      # useful guard for convenience. Image builds need the file to exist; they never
+      # read a real value out of it.
+      - name: provide a .env so compose can parse the file
+        run: cp .env.example .env
+
       # The per-MCP images are FROM insurance-mcp-base, and `base` sits behind a
       # build-only profile, so it has to be built first and by name.
       - name: build the shared base

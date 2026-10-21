@@ -1,0 +1,45 @@
+# Keep the build context small. Everything the images actually need is copied
+# explicitly by infra/docker/Dockerfile.*: requirements.txt, packages/,
+# observability/, mcp-servers/, scripts/, migrations/, alembic.ini and
+# ai-orchestrator/ — so nothing listed here is ever COPYed.
+#
+# The heavy one is a local virtualenv: without this, every `docker compose build`
+# on a developer machine uploads hundreds of megabytes of site-packages as build
+# context before doing anything.
+
+# Local environments
+.venv/
+venv/
+env/
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime and generated data — never part of an image
+data/uploads/
+evals/.artifacts/
+
+# Secrets. .env is mounted or injected at run time, never baked in.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
