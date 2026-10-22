@@ -54,7 +54,7 @@ cachetools>=5.5,<6
 # Only imported when OBSERVABILITY_BACKEND includes `langfuse`; the tracer
 # contract in observability/tracers/base_tracer.py has no dependency on it.
 # Pulls in the OpenTelemetry SDK, which the offline backend tests also use.
-langfuse>=4.17,<5
+langfuse>=5.0.2,<6
 
 # ── Used by the test conftests and the dev seeder, not by the services ───────
 # Declared here rather than in requirements-dev.in because the seeder ships in
