@@ -48,7 +48,7 @@ fastapi>=0.136,<1
 # PyJWT, not python-jose: pip-audit reports two advisories against python-jose
 # 3.3.0 with no fixed version published. See ai-orchestrator/auth/jwt.py.
 PyJWT[crypto]>=2.10,<3
-cachetools>=5.5,<6
+cachetools>=7.2.3,<8
 
 # ── Observability (Rule 9) ───────────────────────────────────────────────────
 # Only imported when OBSERVABILITY_BACKEND includes `langfuse`; the tracer
