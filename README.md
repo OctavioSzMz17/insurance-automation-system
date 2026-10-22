@@ -1,5 +1,7 @@
 # LIA — Insurance Claims Automation
 
+![LIA — the model proposes, the system decides](docs/assets/lia-overview.svg)
+
 [![CI](https://github.com/OctavioSzMz17/insurance-automation-system/actions/workflows/ci.yml/badge.svg)](https://github.com/OctavioSzMz17/insurance-automation-system/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![Tests](https://img.shields.io/badge/tests-345%20passing-brightgreen)
