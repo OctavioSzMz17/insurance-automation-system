@@ -63,6 +63,23 @@ jobs:
       - name: architecture diagrams are current
         run: python -m scripts.docs.export_graphs --check
 
+      # The pipeline validates itself. GitHub's expression language is layered on top
+      # of YAML, so a file can parse perfectly and still be rejected at run time —
+      # which is exactly what happened here: `join(needs.*.result, " ")` used double
+      # quotes, expressions only accept single ones, and three runs died before
+      # creating a single job while the PR reported "Checks 0".
+      #
+      # actionlint reports that as `ci.yml:330:48: only single quotes are available
+      # for string delimiter`. Pulled by digest rather than :latest so this step
+      # cannot change under us (Rule 10). Refresh with:
+      #   docker pull rhysd/actionlint:latest && \
+      #   docker inspect --format='{{index .RepoDigests 0}}' rhysd/actionlint:latest
+      - name: actionlint
+        run: |
+          docker run --rm -v "$PWD:/repo" --workdir /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 \
+            -color .github/workflows/ci.yml
+
   # ── Unit and integration tests ──────────────────────────────────────────────
   test:
     name: tests (orchestrator)

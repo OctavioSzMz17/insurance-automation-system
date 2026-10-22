@@ -1,0 +1,70 @@
+# Automated dependency updates.
+#
+# Why this exists: on 2026-10-18 the pipeline was green. On 2026-10-21 the same
+# commit failed, because advisories for `certifi` and `pypdf` had been published in
+# between. Nothing in the repository changed — the world did. `pypdf` parses
+# untrusted claim PDFs, so an advisory there is directly reachable by the documents
+# the adversarial suite feeds it.
+#
+# Finding that out from a red build is the slow way. Dependabot opens the PR instead.
+#
+# What makes this safe to turn on: the `lockfile in sync` job recompiles
+# requirements.txt from requirements.in and diffs it. If Dependabot ever produces a
+# lock our own script would not produce, that job fails and the PR cannot merge. The
+# adversarial suite and 345 tests run on every one of its PRs too, so no dependency
+# bump reaches main without the containment invariants being re-proven.
+
+version: 2
+
+updates:
+
+  # ── Python ────────────────────────────────────────────────────────────────
+  # Dependabot's pip-compile support is good but not perfect with hash-pinned
+  # output. When it cannot regenerate the lock cleanly, the lockfile job catches
+  # it and the fix is to run scripts/security/compile_requirements.sh --upgrade
+  # by hand and push over its branch.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    # Routine minor and patch bumps arrive as one PR so the queue stays readable.
+    # Security updates are exempt from grouping by Dependabot and still arrive
+    # individually, which is what we want: a security fix should be reviewable on
+    # its own rather than buried in a batch of twenty unrelated version bumps.
+    groups:
+      python-routine:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps(dev)"
+
+  # ── GitHub Actions ────────────────────────────────────────────────────────
+  # The workflow pins actions by major tag (actions/checkout@v4). Those move, and
+  # a deprecated runner image or a yanked action breaks CI with no code change.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+
+  # ── Container base images ─────────────────────────────────────────────────
+  # Dockerfile.mcp-base pins python:3.12-slim by digest, which is correct and also
+  # means it never picks up a security rebuild on its own. This is what keeps a
+  # digest pin from quietly becoming a stale pin.
+  - package-ecosystem: docker
+    directory: "/infra/docker"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "deps(docker)"
