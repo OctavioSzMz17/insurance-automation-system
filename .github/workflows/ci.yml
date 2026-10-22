@@ -284,7 +284,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
+      # Deliberately NOT setting up buildx. `docker/setup-buildx-action` switches the
+      # builder to the `docker-container` driver, whose output goes to the builder's
+      # own cache rather than the daemon's image store. The five service images are
+      # `FROM insurance-mcp-base:latest`, so with that driver they cannot see the base
+      # image built a step earlier and fall back to pulling it from Docker Hub, where
+      # it does not exist. The runner's default driver builds into the local store,
+      # which is exactly what chaining a local base image needs.
 
       # Five services declare `env_file: .env`, and Compose refuses to parse the file
       # at all when it is missing — before it gets anywhere near a build. `.env` is
