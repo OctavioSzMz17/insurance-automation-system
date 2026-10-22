@@ -15,7 +15,7 @@ pydantic-settings>=2.5,<3
 email-validator>=2.2,<3
 
 # ── MCP SDK + ASGI ────────────────────────────────────────────────────────────
-mcp>=1.23,<2
+mcp>=2.3.0,<3
 starlette>=1.1,<2
 uvicorn[standard]>=0.32,<1
 
