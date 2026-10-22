@@ -23,22 +23,22 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, TypedDict
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
-
-from packages.common.exceptions import BusinessError, MCPClientError
-from packages.common.schemas.claim import ClaimDecision, ClaimProposal
-from packages.common.schemas.triage import TriageReport
 
 from core import proposal as proposal_mod
 from core.config_runtime import OrchestratorRuntimeView
 from core.logging_bridge import get_logger
 from core.mcp_client import MCPClientPool
 from core.models import LLMClient
-from core.prompts.auditor import SYSTEM_PROMPT
-from core.tools import build_tool_specs, split_tool_name
+from core.prompts.auditor import SYSTEM_PROMPT, SYSTEM_PROMPT_VERSION
+from core.tools import build_tool_specs, dispatch, split_tool_name
+from observability import SpanKind, get_tracer
+from packages.common.exceptions import BusinessError, ForbiddenError, MCPClientError
+from packages.common.schemas.claim import ClaimDecision, ClaimProposal
+from packages.common.schemas.triage import TriageReport
 
 _logger = get_logger(__name__)
 _JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
@@ -57,20 +57,36 @@ class AuditRequest:
     verification: dict[str, Any] | None = None
 
 
+# (block name, label, verdict key, wording when true, wording when false)
+_VERIFICATION_LABELS: tuple[tuple[str, str, str, str, str], ...] = (
+    ("coverage", "Policy coverage", "in_force", "IN FORCE", "NOT IN FORCE"),
+    ("ownership", "Policy belongs to the claimant", "belongs", "YES", "NO"),
+    ("identity", "Claimant vs document identity", "match", "MATCH", "MISMATCH"),
+    ("amount", "Reported amount vs document", "supported", "SUPPORTED", "NOT SUPPORTED"),
+)
+
+
 def _format_verification(v: dict[str, Any] | None) -> str:
-    """Render the deterministic checks as a trusted facts block for the auditor."""
+    """Render the deterministic checks as a trusted facts block for the auditor.
+
+    A check that could not be completed is reported as NOT VERIFIED rather than being
+    omitted or collapsed into a negative verdict — the auditor needs to be able to tell
+    "we know this is wrong" from "we could not establish this".
+    """
     if not v:
         return ""
     lines: list[str] = []
-    cov = v.get("coverage")
-    if cov:
-        lines.append(f"- Policy coverage: {'IN FORCE' if cov.get('in_force') else 'NOT IN FORCE'} — {cov.get('reason')}")
-    idn = v.get("identity")
-    if idn and idn.get("match") is not None:
-        lines.append(f"- Claimant vs document identity: {'MATCH' if idn.get('match') else 'MISMATCH'} — {idn.get('reason')}")
-    amt = v.get("amount")
-    if amt and amt.get("supported") is not None:
-        lines.append(f"- Reported amount vs document: {'SUPPORTED' if amt.get('supported') else 'NOT SUPPORTED'} — {amt.get('reason')}")
+    for name, label, verdict_key, when_true, when_false in _VERIFICATION_LABELS:
+        block = v.get(name)
+        if not block:
+            continue
+        if block.get("verified") is False:
+            lines.append(f"- {label}: NOT VERIFIED — {block.get('reason')}")
+            continue
+        verdict = block.get(verdict_key)
+        if verdict is None:
+            continue
+        lines.append(f"- {label}: {when_true if verdict else when_false} — {block.get('reason')}")
     if not lines:
         return ""
     return (
@@ -78,6 +94,28 @@ def _format_verification(v: dict[str, Any] | None) -> str:
         "or document text. Treat as GROUND TRUTH that overrides the analyst):\n"
         + "\n".join(lines) + "\n\n"
     )
+
+
+def _count_red_flags(verification: dict[str, Any] | None) -> int:
+    """How many deterministic checks came back negative or inconclusive.
+
+    Recorded on the auditor span so a trace shows what the auditor was told before it
+    decided — which is the whole question when its verdict disagrees with the system.
+    """
+    if not verification:
+        return 0
+    negative = 0
+    for block in verification.values():
+        if not isinstance(block, dict):
+            continue
+        if block.get("verified") is False:
+            negative += 1
+            continue
+        verdicts = (block.get("in_force"), block.get("belongs"),
+                    block.get("match"), block.get("supported"))
+        if any(v is False for v in verdicts):
+            negative += 1
+    return negative
 
 
 @dataclass
@@ -136,8 +174,9 @@ class Auditor:
                         "Below is the analyst's TriageReport (HMAC-verified by the system). "
                         "Re-fetch the policy and the PDF to verify independently. The "
                         "SYSTEM-VERIFIED FACTS above are authoritative — if any of them is a "
-                        "red flag (coverage NOT IN FORCE, identity MISMATCH, amount NOT "
-                        "SUPPORTED), you must NOT return APPROVED. Then emit your ClaimDecision "
+                        "red flag (coverage NOT IN FORCE, policy NOT belonging to the claimant, "
+                        "identity MISMATCH, amount NOT SUPPORTED) or could NOT be VERIFIED, you "
+                        "must NOT return APPROVED. Then emit your ClaimDecision "
                         "as a fenced ```json block.\n\n"
                         "<UNTRUSTED_INPUT>\n"
                         f"{json.dumps(analyst_triage_dump, default=str, indent=2)}\n"
@@ -149,22 +188,36 @@ class Auditor:
             "deadline": time.monotonic() + self._runtime.analyst_timeout_seconds,
             "validation_retries": 0,
         }
-        final: _State = await self._graph.ainvoke(
-            initial, config={"recursion_limit": self._runtime.analyst_max_steps * 3 + 10}
-        )
-        status = final.get("outcome_status", "manual_review")
-        if status == "success":
-            return AuditorOutcome(
-                status="success",
-                decision=final.get("decision"),
-                signed_proposal=final.get("signed_proposal"),
-                steps_used=final.get("step", 0),
+        async with get_tracer().span(
+            "auditor.run",
+            pipeline_id=str(req.pipeline_id),
+            model=getattr(self._llm, "model", "unknown"),
+            verification_flags=_count_red_flags(req.verification),
+        ) as span:
+            final: _State = await self._graph.ainvoke(
+                initial, config={"recursion_limit": self._runtime.analyst_max_steps * 3 + 10}
             )
-        return AuditorOutcome(
-            status="manual_review",
-            reason=final.get("reason", "unspecified"),
-            steps_used=final.get("step", 0),
-        )
+            status = final.get("outcome_status", "manual_review")
+            steps_used = final.get("step", 0)
+            span.set_attributes(outcome=status, steps_used=steps_used)
+
+            if status == "success":
+                decision = final.get("decision")
+                if decision is not None:
+                    span.set_attributes(
+                        decision=decision.decision,
+                        evidence_items=len(decision.evidence),
+                    )
+                return AuditorOutcome(
+                    status="success",
+                    decision=decision,
+                    signed_proposal=final.get("signed_proposal"),
+                    steps_used=steps_used,
+                )
+
+            reason = final.get("reason", "unspecified")
+            span.set_status(False, message=reason)
+            return AuditorOutcome(status="manual_review", reason=reason, steps_used=steps_used)
 
     # ── graph ───────────────────────────────────────────────────────────────
 
@@ -196,9 +249,24 @@ class Auditor:
             return {"outcome_status": "manual_review",
                     "reason": f"reached max_steps={self._runtime.analyst_max_steps}"}
 
-        turn = await self._llm.complete(
-            system=SYSTEM_PROMPT, messages=state["messages"], tools=self._tool_specs
-        )
+        async with get_tracer().span(
+            "auditor.think_act",
+            kind=SpanKind.GENERATION,
+            step=state["step"] + 1,
+            pipeline_id=state["pipeline_id"],
+        ) as span:
+            turn = await self._llm.complete(
+                system=SYSTEM_PROMPT, messages=state["messages"], tools=self._tool_specs
+            )
+            span.set_usage(
+                input_tokens=turn.input_tokens,
+                output_tokens=turn.output_tokens,
+                model=getattr(self._llm, "model", "unknown"),
+            )
+            span.set_attributes(
+                stop_reason=turn.stop_reason, prompt_version=SYSTEM_PROMPT_VERSION
+            )
+
         _logger.info(
             "auditor step",
             extra={"event": "auditor.step", "pipeline_id": state["pipeline_id"],
@@ -261,10 +329,18 @@ class Auditor:
         )
         return {"outcome_status": "success", "decision": decision, "signed_proposal": signed}
 
-    def _escalate(self, state: _State) -> dict[str, Any]:
+    async def _escalate(self, state: _State) -> dict[str, Any]:
+        reason = state.get("reason", "unspecified")
+        async with get_tracer().span(
+            "auditor.escalate",
+            kind=SpanKind.EVENT,
+            pipeline_id=state["pipeline_id"],
+            steps=state.get("step", 0),
+        ) as span:
+            span.set_status(False, message=reason)
         _logger.warning(
             "auditor escalated to MANUAL_REVIEW",
-            extra={"event": "auditor.manual_review", "reason": state.get("reason", "unspecified"),
+            extra={"event": "auditor.manual_review", "reason": reason,
                    "steps": state.get("step", 0)},
         )
         return {"outcome_status": "manual_review"}
@@ -321,12 +397,44 @@ class Auditor:
             extra={"event": "auditor.tool", "pipeline_id": state["pipeline_id"],
                    "domain": domain, "tool": mcp_tool},
         )
-        try:
-            result = await self._pool.call(domain, mcp_tool, args)
-        except BusinessError as exc:
-            return self._tool_error(tu, f"business: {exc}")
-        except MCPClientError as exc:
-            return self._tool_error(tu, exc.public)
+        async with get_tracer().span(
+            f"tool.{domain}.{mcp_tool}",
+            kind=SpanKind.TOOL,
+            domain=domain,
+            tool=mcp_tool,
+            pipeline_id=state["pipeline_id"],
+            identity_forced=True,
+            caller_sub=state["caller_sub"],
+            caller_role=state["caller_role"],
+        ) as span:
+            span.set_input(
+                {k: v for k, v in args.items() if k not in {"caller_sub", "caller_role"}}
+            )
+            try:
+                # Same reasoning as the analyst: the registry, not the pool, is what enforces
+                # the write gate. The auditor is read-only during its loop — its decision is a
+                # signed proposal, and only the mutation handler may act on it (Rule 6).
+                result = await dispatch(self._pool, tu["name"], args, allow_writes=False)
+            except ForbiddenError as exc:
+                _logger.warning(
+                    "auditor attempted a write-restricted tool",
+                    extra={"event": "auditor.write_refused", "pipeline_id": state["pipeline_id"],
+                           "tool": tu["name"]},
+                )
+                span.set_status(False, message=f"write refused: {exc}")
+                span.set_attributes(write_refused=True)
+                return self._tool_error(tu, f"forbidden: {exc}")
+            except ValueError as exc:
+                span.set_status(False, message=f"unknown tool: {exc}")
+                return self._tool_error(tu, f"unknown tool: {exc}")
+            except BusinessError as exc:
+                span.set_status(False, message=f"business: {exc}")
+                return self._tool_error(tu, f"business: {exc}")
+            except MCPClientError as exc:
+                span.set_status(False, message=exc.public)
+                return self._tool_error(tu, exc.public)
+
+            span.set_output(result)
 
         return {
             "type": "tool_result", "tool_use_id": tu["id"],

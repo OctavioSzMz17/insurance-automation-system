@@ -13,7 +13,6 @@ from sqlalchemy import text
 from _common.db import get_engine
 from packages.common.exceptions import NotFoundError
 
-
 _SELECT_CLAIM = text(
     """
     SELECT id::text AS id,
@@ -172,7 +171,6 @@ async def insert_claim(
     ai_summary: str | None = None,
 ) -> dict[str, Any]:
     """Insert a new claim. Returns the row, or the existing one if dedup-collision (Rule 13)."""
-    import json
     engine = await get_engine(dsn)
     async with engine.begin() as conn:
         rs = await conn.execute(

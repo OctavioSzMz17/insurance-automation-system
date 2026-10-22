@@ -93,7 +93,7 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Unknown role in token: {role_str!r}",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
 
     return UserPrincipal(sub=sub, role=role)
 

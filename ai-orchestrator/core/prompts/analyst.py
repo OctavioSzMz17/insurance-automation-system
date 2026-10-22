@@ -10,6 +10,8 @@ analyst loop discards it.
 """
 from __future__ import annotations
 
+from . import prompt_version
+
 SYSTEM_PROMPT = """\
 You are the insurance claim analyst agent. You read evidence from MCP tools and
 produce a structured TriageReport summarising one claim. You never persist anything.
@@ -58,3 +60,8 @@ When you have everything, emit the JSON object inside a single fenced block:
 {...}
 ```
 """
+
+#: Content-addressed version of the prompt above. Recorded on every
+#: generation span so a claim can always be traced to the exact text that
+#: produced it (see core/prompts/__init__.py).
+SYSTEM_PROMPT_VERSION = prompt_version(SYSTEM_PROMPT)

@@ -62,7 +62,7 @@ async def mint_ticket(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Could not mint stream ticket.",
-        )
+        ) from exc
 
     logger.info("SSE ticket minted | sub=%s request_id=%s", user.sub, request_id)
     return {"ticket_id": ticket_id, "request_id": request_id, "expires_in": store._ttl}

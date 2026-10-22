@@ -24,30 +24,35 @@ def _wrap(handler):
 # ── happy path ──────────────────────────────────────────────────────────────
 
 
-async def test_analyst_reads_self_by_id(fixture_ids):
+async def test_client_reads_self_by_id(fixture_ids):
+    """The non-ADMIN self-read path: caller_sub must equal the target's email.
+
+    Exercised with a client sub rather than an analyst's, because after migration 0004
+    this MCP serves `clients` and a staff member has no row here at all.
+    """
     tools = _build_tools_map()
     res = await _wrap(tools["get_user_by_id"].handler)(
         {
-            "user_id": str(fixture_ids["analyst_id"]),
-            "caller_sub": fixture_ids["analyst_sub"],
+            "user_id": str(fixture_ids["client_id"]),
+            "caller_sub": fixture_ids["client_sub"],
             "caller_role": "ANALYST",
         }
     )
     assert "error" not in res, res
-    assert res["user"]["email"] == fixture_ids["analyst_sub"]
+    assert res["user"]["email"] == fixture_ids["client_sub"]
 
 
-async def test_analyst_reads_self_by_email(fixture_ids):
+async def test_client_reads_self_by_email(fixture_ids):
     tools = _build_tools_map()
     res = await _wrap(tools["get_user_by_email"].handler)(
         {
-            "email": fixture_ids["analyst_sub"],
-            "caller_sub": fixture_ids["analyst_sub"],
+            "email": fixture_ids["client_sub"],
+            "caller_sub": fixture_ids["client_sub"],
             "caller_role": "ANALYST",
         }
     )
     assert "error" not in res, res
-    assert res["user"]["email"] == fixture_ids["analyst_sub"]
+    assert res["user"]["email"] == fixture_ids["client_sub"]
 
 
 async def test_admin_reads_any_user(other_user, fixture_ids):

@@ -7,9 +7,9 @@ Public API:
     decode_jwt           — verify + decode a JWT, raises 401 on failure
     require_role         — FastAPI Depends() factory enforcing role gates
 """
-from .roles import Role, UserPrincipal, has_role_or_higher
-from .jwt import create_access_token, decode_jwt
 from .dependencies import require_role
+from .jwt import create_access_token, decode_jwt
+from .roles import Role, UserPrincipal, has_role_or_higher
 
 __all__ = [
     "Role",

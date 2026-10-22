@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import io
-import os
 import sys
 import uuid
 from pathlib import Path
 
 import pytest
-import pytest_asyncio
 from dotenv import load_dotenv
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
@@ -71,7 +71,10 @@ class _RuntimeView:
         self.mcp_documents_url = "http://x"
         self.mcp_shared_secret = "x" * 32
         self.hmac_proposal_key = "y" * 32
-        self.analyst_max_steps = 5
+        # Must exceed MAX_VALIDATION_RETRIES + the tool-call steps a scenario needs,
+        # otherwise a test aiming at the validation-escalation path trips the max_steps
+        # guard first and asserts on the wrong reason.
+        self.analyst_max_steps = 8
         self.analyst_timeout_seconds = 30
         self.analyst_proposal_ttl_seconds = 60
         self.llm_model = "stub"

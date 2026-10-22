@@ -1,0 +1,37 @@
+# Line-ending policy.
+#
+# Everything in this repository ultimately runs inside Linux containers, so the
+# committed form is LF and git must not rewrite it on checkout.
+#
+# This is not cosmetic. `infra/docker/entrypoint_mcp.sh` is the ENTRYPOINT of all
+# four MCP containers. Checked out with CRLF, its shebang becomes `#!/usr/bin/env sh\r`
+# and the kernel looks for an interpreter literally named "sh\r" — every MCP container
+# fails to start. `scripts/security/compile_requirements.sh` fails the same way, on
+# `set -euo pipefail\r`.
+#
+# Note that CI cannot catch this class of bug: a Linux runner checks out LF whatever
+# the repository says. It only appears when building from a Windows or macOS clone,
+# which is precisely why it belongs in a file rather than in someone's local config.
+
+# Default: let git detect text files, and keep LF in the working tree.
+* text=auto eol=lf
+
+# Executables interpreted by a shell — the shebang must not carry a CR.
+*.sh            text eol=lf
+entrypoint*     text eol=lf
+
+# Container and orchestration definitions, read by Linux tooling.
+Dockerfile*     text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.ini           text eol=lf
+*.toml          text eol=lf
+*.mako          text eol=lf
+
+# Never touched by the newline filter.
+*.pdf           binary
+*.png           binary
+*.jpg           binary
+*.ico           binary
+*.pem           binary
+*.key           binary

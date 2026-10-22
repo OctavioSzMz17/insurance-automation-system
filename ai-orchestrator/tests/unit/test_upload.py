@@ -6,12 +6,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routes.upload import router
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

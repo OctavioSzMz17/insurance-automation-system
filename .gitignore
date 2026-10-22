@@ -36,3 +36,6 @@ build/
 # Runtime user data — uploaded claim PDFs / photos (never commit)
 data/uploads/
 !data/uploads/.gitkeep
+
+# Eval artifacts — generated fixture PDFs and scored reports (reproducible: `python -m evals.runner --report`)
+evals/.artifacts/

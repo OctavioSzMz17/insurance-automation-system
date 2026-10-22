@@ -3,14 +3,12 @@ from __future__ import annotations
 
 import json
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from auth.roles import Role
-from core.hitl import HITLStore, _TRACKING_SET, _tracking_data_key
+from core.hitl import _TRACKING_SET, HITLStore, _tracking_data_key
 from workers.hitl_reaper import _process_expired, run_reaper
-
 
 # ── Fake Redis ────────────────────────────────────────────────────────────────
 

@@ -6,131 +6,42 @@ extracted from the token — not accepted in the request body.
 from __future__ import annotations
 
 import logging
-import re
-import unicodedata
-from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
-from agents.analyst import Analyst, RunContext
-from agents.auditor import AuditRequest, Auditor
-from agents.mutation_handler import ApprovalContext, MutationHandler
+from agents.analyst import RunContext
+from agents.auditor import AuditRequest
+from agents.mutation_handler import ApprovalContext
 from auth import Role, UserPrincipal, require_role
 from core import proposal as proposal_mod
 from core.hitl import HITLStore
+from core.service_identity import verification_identity
 from core.tools import dispatch
+from core.verification import (
+    build_review_flags,
+    evaluate_amount,
+    evaluate_coverage,
+    evaluate_identity,
+    evaluate_policy_ownership,
+    unverified,
+)
+from observability import Span, SpanKind, get_tracer
 from packages.common.exceptions import ForbiddenError, NotFoundError
 from packages.common.schemas.claim import ClaimDecision, ClaimProposal
+from packages.common.schemas.rehydrate import from_stored
 from packages.common.schemas.triage import TriageReport
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["agents"])
 
 
-def _evaluate_coverage(policy: dict[str, Any]) -> dict[str, Any]:
-    """Deterministic policy-validity check (Rule 4: hard facts are not left to the LLM).
-
-    A policy is in force when its status is ACTIVE *and* today falls within the
-    [effective_from, effective_to] window. ISO YYYY-MM-DD strings compare lexically.
-    """
-    status = str(policy.get("status") or "").upper()
-    ef = str(policy.get("effective_from") or "")[:10]
-    et = str(policy.get("effective_to") or "")[:10]
-    today = date.today().isoformat()
-
-    active = status == "ACTIVE"
-    in_window = bool(ef and et and ef <= today <= et)
-    in_force = active and in_window
-
-    if in_force:
-        reason = "Póliza vigente."
-    elif not active:
-        reason = f"Estado de póliza: {status or 'desconocido'}."
-    elif et and today > et:
-        reason = f"La vigencia terminó el {et}."
-    elif ef and today < ef:
-        reason = f"La vigencia inicia el {ef}."
-    else:
-        reason = "Vigencia no determinable."
-
-    return {
-        "in_force": in_force,
-        "status": status,
-        "effective_from": ef or None,
-        "effective_to": et or None,
-        "reason": reason,
-    }
-
-
-def _norm_text(s: str) -> str:
-    """Lowercase + strip accents + collapse whitespace, for robust name matching."""
-    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode("ascii")
-    return " ".join(s.lower().split())
-
-
-def _evaluate_identity(claimant_name: str | None, pdf_text: str) -> dict[str, Any]:
-    """Deterministic anti-impersonation check (Rule 4).
-
-    Confirms the claim document actually names the CLIENT the operator filed it
-    for. Catches "filed on behalf of Ana but the PDF belongs to Carlos".
-    A match is the full normalized name as a substring, OR every name token
-    (len>=3) present as a whole word.
-    """
-    name = _norm_text(claimant_name or "")
-    text = _norm_text(pdf_text or "")
-    if not name:
-        return {"match": None, "claimant_name": claimant_name,
-                "reason": "El cliente seleccionado no tiene nombre registrado."}
-
-    tokens = [t for t in name.split() if len(t) >= 3]
-    tokens_present = bool(tokens) and all(re.search(rf"\b{re.escape(t)}\b", text) for t in tokens)
-    match = (name in text) or tokens_present
-
-    reason = (
-        "El documento menciona al asegurado seleccionado."
-        if match else
-        f"El documento NO menciona a «{claimant_name}» — posible suplantación de identidad."
-    )
-    return {"match": match, "claimant_name": claimant_name, "reason": reason}
-
-
-def _evaluate_amount(reported_amount: Any, pdf_text: str) -> dict[str, Any]:
-    """Deterministic anti-hallucination check on the monetary amount (Rule 4).
-
-    An LLM may invent a damage figure not present in the document. This confirms
-    the reported amount actually appears in the PDF text. $0 (no amount claimed)
-    is treated as supported — it is the honest 'no figure stated' outcome.
-    """
-    if reported_amount in (None, ""):
-        return {"supported": None, "amount": reported_amount, "reason": "Sin monto reportado."}
-    try:
-        val = round(float(reported_amount), 2)
-    except (TypeError, ValueError):
-        return {"supported": None, "amount": reported_amount, "reason": "Monto no numérico."}
-    if val == 0:
-        return {"supported": True, "amount": reported_amount, "reason": "Sin monto reclamado ($0)."}
-
-    # Collect every monetary-looking number present in the document.
-    pdf_values: set[float] = set()
-    for tok in re.findall(r"\$?\s*(\d[\d.,]*)", pdf_text or ""):
-        cleaned = tok.replace(",", "").rstrip(".")
-        try:
-            pdf_values.add(round(float(cleaned), 2))
-        except ValueError:
-            continue
-
-    supported = val in pdf_values
-    reason = (
-        "El monto reportado aparece en el documento."
-        if supported else
-        f"El monto reportado (${reported_amount}) NO aparece en el documento — posible valor inventado por la IA."
-    )
-    return {"supported": supported, "amount": reported_amount, "reason": reason}
+# The deterministic checks live in core/verification.py — pure functions, no I/O, so
+# they can be unit-tested and exercised by the adversarial eval suite (evals/).
 
 
 # ── Request / response models ─────────────────────────────────────────────────
@@ -182,6 +93,7 @@ class PendingProposalSummary(BaseModel):
     summary: str | None = None
     created_at: str | None = None
     coverage: dict[str, Any] | None = None
+    ownership: dict[str, Any] | None = None
     identity: dict[str, Any] | None = None
     amount: dict[str, Any] | None = None
 
@@ -206,6 +118,7 @@ class ProposalDetailResponse(BaseModel):
     pipeline_id: str | None = None
     claimant_sub: str | None = None
     coverage: dict[str, Any] | None = None
+    ownership: dict[str, Any] | None = None
     identity: dict[str, Any] | None = None
     amount: dict[str, Any] | None = None
     auditor: dict[str, Any] | None = None
@@ -258,11 +171,70 @@ async def get_pdf(
     return FileResponse(dest, media_type="application/pdf", filename=f"{pipeline_id}.pdf")
 
 
+async def _trace_verification(
+    *,
+    coverage: dict[str, Any] | None,
+    ownership: dict[str, Any] | None,
+    identity: dict[str, Any] | None,
+    amount: dict[str, Any] | None,
+    review_flags: list[str],
+) -> None:
+    """Emit one span per deterministic check.
+
+    These are emitted after the fact rather than wrapped around the MCP reads: the
+    checks themselves are microseconds, and what a reader (or the live graph UI) wants
+    from them is the verdict, not a duration.
+    """
+    tracer = get_tracer()
+    blocks = (
+        ("coverage", coverage, "in_force"),
+        ("ownership", ownership, "belongs"),
+        ("identity", identity, "match"),
+        ("amount", amount, "supported"),
+    )
+    async with tracer.span("verification", flags=len(review_flags)) as parent:
+        for name, block, verdict_key in blocks:
+            if block is None:
+                continue
+            async with tracer.span(f"check.{name}", kind=SpanKind.EVENT) as child:
+                child.set_attributes(**{k: v for k, v in block.items() if k != "reason"})
+                inconclusive = block.get("verified") is False
+                if inconclusive or block.get(verdict_key) is False:
+                    child.set_status(False, message=str(block.get("reason") or ""))
+        parent.score("review_flags", len(review_flags))
+        if review_flags:
+            parent.set_status(False, message=" ".join(review_flags))
+
+
 @router.post("/analyze", response_model=AnalyzeResponse)
 async def analyze(
     req: AnalyzeRequest,
     request: Request,
     user: UserPrincipal = Depends(require_role(Role.ANALYST)),
+) -> AnalyzeResponse:
+    """Root of a claim's trace.
+
+    The body lives in `_analyze` so the span can wrap the whole pipeline without
+    re-indenting it — the handler is long, and an indentation-only diff over a hundred
+    lines hides the actual change from review.
+    """
+    async with get_tracer().trace(
+        "claim.analyze",
+        session_id=str(req.pipeline_id),
+        pipeline_id=str(req.pipeline_id),
+        claimant_sub=req.claimant_sub,
+        operator_sub=user.sub,
+        operator_role=user.role.value,
+    ) as root:
+        response = await _analyze(req, request, user, root)
+        root.set_attributes(outcome=response.status, steps_used=response.steps_used)
+        if response.status != "success":
+            root.set_status(False, message=response.reason or "manual review")
+        return response
+
+
+async def _analyze(
+    req: AnalyzeRequest, request: Request, user: UserPrincipal, root: Span
 ) -> AnalyzeResponse:
     app_state = request.app.state
     ctx = RunContext(
@@ -280,61 +252,86 @@ async def analyze(
     triage_dump = outcome.triage.model_dump(mode="json") if outcome.triage else None
     proposal_id = str(outcome.proposal.proposal_id)
 
-    # ── Deterministic coverage check on the resolved policy (Rule 4) ──────────
+    # ── Deterministic verification (Rule 4). Every read below is attributed to the
+    #    verification service principal, not to the operator: these are the system's
+    #    own facts, and binding them to the caller's permissions made the anti-
+    #    impersonation check silently unavailable to an ANALYST operator.
+    #    A failed check records `unverified` rather than None, so it raises a review
+    #    flag instead of being indistinguishable from a clean result. The same report
+    #    is recomputed at the write boundary by MutationHandler, which is where it
+    #    becomes blocking — here it informs the auditor and the HITL screen. ──
+    identity_args = verification_identity()
+
+    policy: dict[str, Any] | None = None
     coverage: dict[str, Any] | None = None
     policy_id = (triage_dump or {}).get("policy_id")
     if policy_id:
         try:
             pol_res = await app_state.pool.call(
-                "policies", "get_policy_by_id",
-                {"policy_id": policy_id, "caller_sub": user.sub, "caller_role": user.role.value},
+                "policies", "get_policy_by_id", {"policy_id": policy_id, **identity_args},
             )
-            coverage = _evaluate_coverage(pol_res.get("policy") or {})
-        except Exception as exc:  # noqa: BLE001 — coverage is best-effort, never blocks triage
+            policy = pol_res.get("policy") or {}
+            coverage = evaluate_coverage(policy)
+        except Exception as exc:  # noqa: BLE001
             logger.warning("coverage check failed | policy_id=%s err=%s", policy_id, exc)
+            coverage = unverified(f"No se pudo verificar la vigencia de la póliza: {exc}")
 
-    # ── Fetch the PDF text once for the checks that read the document. ─────────
-    pdf_text = ""
+    pdf_text: str | None = None
+    pdf_error: str | None = None
     try:
         doc = await app_state.pool.call(
-            "documents", "extract_text",
-            {"pipeline_id": str(req.pipeline_id), "caller_sub": user.sub, "caller_role": user.role.value},
+            "documents", "extract_text", {"pipeline_id": str(req.pipeline_id), **identity_args},
         )
         pdf_text = doc.get("text") or ""
-    except Exception as exc:  # noqa: BLE001 — best-effort, never blocks triage
+    except Exception as exc:  # noqa: BLE001
+        pdf_error = str(exc)
         logger.warning("pdf text fetch failed | err=%s", exc)
 
-    # ── Identity check: does the PDF actually name the selected claimant?
-    #    Catches filing a claim on behalf of the wrong client (Rule 4). ──
+    # ── Identity: does the document actually name the selected claimant? Catches
+    #    filing on behalf of the wrong client. Ownership: does the resolved policy
+    #    belong to that claimant? Catches booking the claim against a stranger's
+    #    coverage, which identity and coverage both miss. ──
     identity: dict[str, Any] | None = None
+    ownership: dict[str, Any] | None = None
     if req.claimant_sub:
         try:
             usr = await app_state.pool.call(
-                "users", "get_user_by_email",
-                {"email": req.claimant_sub, "caller_sub": user.sub, "caller_role": user.role.value},
+                "users", "get_user_by_email", {"email": req.claimant_sub, **identity_args},
             )
-            identity = _evaluate_identity((usr.get("user") or {}).get("full_name"), pdf_text)
-        except Exception as exc:  # noqa: BLE001 — best-effort, never blocks triage
+            claimant = usr.get("user") or {}
+            identity = (
+                evaluate_identity(claimant.get("full_name"), pdf_text)
+                if pdf_text is not None
+                else unverified(f"No se pudo leer el documento: {pdf_error}")
+            )
+            if policy is not None:
+                ownership = evaluate_policy_ownership(
+                    policy, claimant_client_id=claimant.get("id")
+                )
+        except Exception as exc:  # noqa: BLE001
             logger.warning("identity check failed | claimant=%s err=%s", req.claimant_sub, exc)
+            reason = f"No se pudo verificar al asegurado: {exc}"
+            identity = unverified(reason)
+            ownership = unverified(reason)
 
-    # ── Amount check: is the reported figure actually in the PDF? Catches a
-    #    hallucinated monetary value (Rule 4). ──
+    # ── Amount: is the reported figure actually in the document? Catches a
+    #    hallucinated monetary value. ──
     amount: dict[str, Any] | None = None
     if triage_dump:
-        amount = _evaluate_amount(triage_dump.get("reported_damage_amount"), pdf_text)
-
-    # ── Deterministic verification report → review flags (shown in HITL and fed
-    #    to the auditor as ground truth). ──
-    review_flags: list[str] = []
-    if coverage and not coverage.get("in_force"):
-        review_flags.append(
-            f"Póliza no vigente: {coverage.get('reason')} "
-            f"(vigencia {coverage.get('effective_from')} → {coverage.get('effective_to')})."
+        amount = (
+            evaluate_amount(triage_dump.get("reported_damage_amount"), pdf_text)
+            if pdf_text is not None
+            else unverified(f"No se pudo leer el documento: {pdf_error}")
         )
-    if identity and identity.get("match") is False:
-        review_flags.append(f"Posible suplantación: {identity.get('reason')}")
-    if amount and amount.get("supported") is False:
-        review_flags.append(f"Monto no respaldado: {amount.get('reason')}")
+
+    review_flags = build_review_flags(
+        coverage=coverage, ownership=ownership, identity=identity, amount=amount
+    )
+    await _trace_verification(
+        coverage=coverage, ownership=ownership, identity=identity,
+        amount=amount, review_flags=review_flags,
+    )
+    root.set_attributes(review_flags=len(review_flags))
 
     # ── Auto-audit: run the auditor agent now (not only at confirm) so its
     #    verdict is visible in HITL. It receives the verification report as
@@ -349,7 +346,8 @@ async def analyze(
             caller_role=user.role.value,
             triage=outcome.triage,
             analyst_proposal=outcome.proposal,
-            verification={"coverage": coverage, "identity": identity, "amount": amount},
+            verification={"coverage": coverage, "ownership": ownership,
+                          "identity": identity, "amount": amount},
         ))
         if ao.status == "success" and ao.decision and ao.signed_proposal:
             audit_decision_id = str(ao.signed_proposal.proposal_id)
@@ -393,6 +391,7 @@ async def analyze(
                         "proposal_id": proposal_id,
                         "pipeline_id": str(req.pipeline_id),
                         "coverage": coverage,
+                        "ownership": ownership,
                         "identity": identity,
                         "amount": amount,
                         "auditor": auditor_result,
@@ -435,6 +434,7 @@ async def analyze(
             "claimant_sub": req.claimant_sub,
             "claim_id": claim_id,
             "coverage": coverage,
+            "ownership": ownership,
             "identity": identity,
             "amount": amount,
             "auditor": auditor_result,
@@ -458,16 +458,32 @@ async def audit(
     request: Request,
     user: UserPrincipal = Depends(require_role(Role.AUDITOR)),
 ) -> AuditResponse:
+    async with get_tracer().trace(
+        "claim.audit", proposal_id=str(req.proposal_id), operator_sub=user.sub,
+    ) as root:
+        response = await _audit(req, request, user, root)
+        root.set_attributes(outcome=response.status, steps_used=response.steps_used)
+        return response
+
+
+async def _audit(
+    req: AuditRequestBody, request: Request, user: UserPrincipal, root: Span
+) -> AuditResponse:
     app_state = request.app.state
     try:
         stored = await app_state.hitl.get_proposal(
             str(req.proposal_id), caller_sub=user.sub, caller_role=user.role.value
         )
     except (NotFoundError, ForbiddenError) as exc:
-        raise HTTPException(status_code=404 if isinstance(exc, NotFoundError) else 403, detail=str(exc))
+        raise HTTPException(status_code=404 if isinstance(exc, NotFoundError) else 403, detail=str(exc)) from exc
 
-    proposal = ClaimProposal(**stored["proposal"])
-    triage = TriageReport(**stored["triage"])
+    # Rehydrated non-strictly: these came back from Redis as JSON, so UUIDs, timestamps
+    # and decimals are strings. Field constraints are still enforced — see from_stored.
+    proposal = from_stored(ClaimProposal, stored["proposal"])
+    triage = from_stored(TriageReport, stored["triage"])
+    # Now that the pipeline is known, join this claim's timeline.
+    root.set_session(str(proposal.pipeline_id))
+    root.set_attributes(pipeline_id=str(proposal.pipeline_id))
 
     from packages.common.exceptions import ValidationFailure
     try:
@@ -477,7 +493,7 @@ async def audit(
             key=app_state.settings.hmac_proposal_key,
         )
     except ValidationFailure as exc:
-        raise HTTPException(status_code=400, detail=f"proposal verification failed: {exc}")
+        raise HTTPException(status_code=400, detail=f"proposal verification failed: {exc}") from exc
 
     audit_req = AuditRequest(
         pipeline_id=proposal.pipeline_id,
@@ -487,6 +503,7 @@ async def audit(
         analyst_proposal=proposal,
         verification={
             "coverage": stored.get("coverage"),
+            "ownership": stored.get("ownership"),
             "identity": stored.get("identity"),
             "amount": stored.get("amount"),
         },
@@ -550,6 +567,7 @@ async def pending(
             summary=triage.get("summary"),
             created_at=proposal.get("issued_at"),
             coverage=stored.get("coverage"),
+            ownership=stored.get("ownership"),
             identity=stored.get("identity"),
             amount=stored.get("amount"),
         ))
@@ -595,6 +613,7 @@ async def proposal_detail(
             pipeline_id=stored.get("pipeline_id"),
             claimant_sub=stored.get("claimant_sub"),
             coverage=stored.get("coverage"),
+            ownership=stored.get("ownership"),
             identity=stored.get("identity"),
             amount=stored.get("amount"),
             auditor=stored.get("auditor"),
@@ -603,7 +622,7 @@ async def proposal_detail(
             proposal=stored.get("proposal"),
         )
     except ForbiddenError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except NotFoundError:
         pass  # expired or not a proposal id → try the durable store
 
@@ -615,7 +634,7 @@ async def proposal_detail(
         )
         claim = res.get("claim") or {}
     except (NotFoundError, ForbiddenError):
-        raise HTTPException(status_code=404, detail="proposal not found or expired")
+        raise HTTPException(status_code=404, detail="proposal not found or expired") from None
     if not claim:
         raise HTTPException(status_code=404, detail="proposal not found or expired")
 
@@ -635,6 +654,7 @@ async def proposal_detail(
         pipeline_id=meta.get("pipeline_id"),
         claimant_sub=claim.get("claimant_sub"),
         coverage=meta.get("coverage"),
+        ownership=meta.get("ownership"),
         identity=meta.get("identity"),
         amount=meta.get("amount"),
         auditor=meta.get("auditor"),
@@ -650,13 +670,37 @@ async def confirm(
     request: Request,
     user: UserPrincipal = Depends(require_role(Role.AUDITOR)),
 ) -> ConfirmResponse:
+    async with get_tracer().trace(
+        "claim.confirm",
+        decision_id=str(req.decision_id),
+        approval=req.approval,
+        approver_sub=user.sub,
+        approver_role=user.role.value,
+    ) as root:
+        response = await _confirm(req, request, user, root)
+        root.set_attributes(outcome=response.status)
+        root.score("human_decision", req.approval)
+        root.score("persisted", response.status == "persisted")
+        if response.status == "refused":
+            root.set_status(False, message=response.reason or "refused")
+        return response
+
+
+async def _confirm(
+    req: ConfirmRequest, request: Request, user: UserPrincipal, root: Span
+) -> ConfirmResponse:
     app_state = request.app.state
     try:
         stored = await app_state.hitl.get_decision(
             str(req.decision_id), caller_sub=user.sub, caller_role=user.role.value
         )
     except (NotFoundError, ForbiddenError) as exc:
-        raise HTTPException(status_code=404 if isinstance(exc, NotFoundError) else 403, detail=str(exc))
+        raise HTTPException(status_code=404 if isinstance(exc, NotFoundError) else 403, detail=str(exc)) from exc
+
+    pipeline_id = (stored.get("analyst_triage") or {}).get("pipeline_id")
+    if pipeline_id:
+        root.set_session(str(pipeline_id))
+        root.set_attributes(pipeline_id=str(pipeline_id))
 
     if req.approval == "reject":
         await app_state.hitl.mark_consumed(str(req.decision_id))
@@ -686,10 +730,10 @@ async def confirm(
     if not await app_state.hitl.mark_consumed(str(req.decision_id)):
         return ConfirmResponse(status="refused", reason="decision already consumed")
 
-    analyst_proposal = ClaimProposal(**stored["analyst_proposal"])
-    analyst_triage = TriageReport(**stored["analyst_triage"])
-    auditor_proposal = ClaimProposal(**stored["auditor_proposal"])
-    auditor_decision = ClaimDecision(**stored["auditor_decision"])
+    analyst_proposal = from_stored(ClaimProposal, stored["analyst_proposal"])
+    analyst_triage = from_stored(TriageReport, stored["analyst_triage"])
+    auditor_proposal = from_stored(ClaimProposal, stored["auditor_proposal"])
+    auditor_decision = from_stored(ClaimDecision, stored["auditor_decision"])
 
     approval = ApprovalContext(
         approver_sub=user.sub,

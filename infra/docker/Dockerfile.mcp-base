@@ -53,6 +53,9 @@ COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
 COPY --chown=appuser:app packages /app/packages
+# observability/ holds the canonical logger and the tracer contract (Rule 9); every
+# service imports it, so it belongs in the shared base rather than per-service images.
+COPY --chown=appuser:app observability /app/observability
 COPY --chown=appuser:app mcp-servers /app/mcp-servers
 COPY --chown=appuser:app scripts /app/scripts
 COPY --chown=appuser:app migrations /app/migrations

@@ -13,7 +13,6 @@ from __future__ import annotations
 import os
 import sys
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -196,5 +195,7 @@ async def test_extra_field_rejected(pipeline_with_pdf):
 async def test_startup_validation_rejects_tmp_in_production(monkeypatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("CLAIM_UPLOAD_DIR", "/tmp/some/sub")
-    with pytest.raises(Exception):
+    # Narrow on purpose: `Exception` would also pass if the code raised an
+    # AttributeError from a typo, which is the opposite of what this asserts.
+    with pytest.raises(ValueError, match="/tmp"):
         _settings().validate_upload_dir()

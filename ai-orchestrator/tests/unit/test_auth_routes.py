@@ -1,15 +1,13 @@
 """Unit tests for routes/auth.py — /auth/token, /auth/logout, /auth/revoke-user."""
 from __future__ import annotations
 
-import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routes.auth import router
-
 
 # ── Minimal test app ──────────────────────────────────────────────────────────
 

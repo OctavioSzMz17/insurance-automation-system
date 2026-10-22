@@ -7,6 +7,7 @@ Roles are ordered — higher tier inherits everything lower tiers can do:
 from __future__ import annotations
 
 from enum import Enum
+
 from pydantic import BaseModel
 
 

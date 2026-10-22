@@ -2,16 +2,14 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from auth.roles import Role
 from auth.stream_tickets import StreamTicketStore
 from routes.sse import router
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -128,8 +126,8 @@ def test_sse_valid_ticket_streams_connected_event():
     token = _make_token()
 
     # Patch _event_stream to emit only the connected event then stop.
+
     from routes import sse as sse_mod
-    import asyncio
 
     async def _finite_stream(request, sub, role, request_id, **kwargs):
         import json as _json

@@ -20,7 +20,11 @@ starlette>=1.1,<2
 uvicorn[standard]>=0.32,<1
 
 # ── Database (async) ──────────────────────────────────────────────────────────
-SQLAlchemy>=2.0,<3
+# The [asyncio] extra is explicit on purpose. SQLAlchemy 2.1 moved `greenlet` out of
+# the default install and into this extra; without it the async engine every MCP uses
+# raises ImportError. 2.0.x pulls greenlet transitively, so this is a no-op today and
+# a prevented outage the first time the lock resolves to 2.1.
+SQLAlchemy[asyncio]>=2.0,<3
 asyncpg>=0.30,<1
 alembic>=1.13,<2
 
@@ -41,5 +45,19 @@ langgraph>=0.2,<1
 fastapi>=0.136,<1
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
-python-jose[cryptography]>=3.3,<4
+# PyJWT, not python-jose: pip-audit reports two advisories against python-jose
+# 3.3.0 with no fixed version published. See ai-orchestrator/auth/jwt.py.
+PyJWT[crypto]>=2.10,<3
 cachetools>=5.5,<6
+
+# ── Observability (Rule 9) ───────────────────────────────────────────────────
+# Only imported when OBSERVABILITY_BACKEND includes `langfuse`; the tracer
+# contract in observability/tracers/base_tracer.py has no dependency on it.
+# Pulls in the OpenTelemetry SDK, which the offline backend tests also use.
+langfuse>=4.17,<5
+
+# ── Used by the test conftests and the dev seeder, not by the services ───────
+# Declared here rather than in requirements-dev.in because the seeder ships in
+# the container image (scripts/ is copied by Dockerfile.mcp-base).
+psycopg2-binary>=2.9,<3
+python-dotenv>=1.0,<2

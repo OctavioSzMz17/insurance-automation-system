@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import ssl
 import tempfile
-import textwrap
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,7 +10,6 @@ import httpx
 import pytest
 
 from core.tls import make_mtls_factory
-
 
 # ── Helpers: generate minimal self-signed cert+key for tests ─────────────────
 
@@ -27,11 +25,12 @@ def _write_temp_certs(tmp: Path) -> tuple[str, str, str]:
     """
     try:
         # Prefer cryptography library (available in CI via httpx extras)
+        import datetime
+
         from cryptography import x509
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
         from cryptography.x509.oid import NameOID
-        import datetime
 
         def _make_cert_and_key(cn: str, ca_key=None, ca_cert=None, is_ca: bool = False):
             key = rsa.generate_private_key(public_exponent=65537, key_size=2048)

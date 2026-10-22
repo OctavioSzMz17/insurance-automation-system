@@ -21,7 +21,14 @@ load_dotenv(_REPO_ROOT / ".env")
 import psycopg2  # noqa: E402
 import psycopg2.extras  # noqa: E402
 
-from scripts.seed.fixtures import ADMIN_ID, ADMIN_SUB, ANALYST_ID, ANALYST_SUB  # noqa: E402
+from scripts.seed.fixtures import (  # noqa: E402
+    ADMIN_ID,
+    ADMIN_SUB,
+    ANALYST_ID,
+    ANALYST_SUB,
+    JUAN_ID,
+    JUAN_SUB,
+)
 from scripts.seed.seed_dev import seed as run_seed  # noqa: E402
 
 psycopg2.extras.register_uuid()
@@ -58,13 +65,18 @@ def db_conn():
 
 @pytest.fixture
 def other_user(db_conn):
-    """Insert a second user with a known id+email; used to test IDOR denial."""
+    """Insert a second CLIENT with a known id+email; used to test IDOR denial.
+
+    `clients`, not `users`: migration 0004 moved insured customers into `clients`
+    and left `users` for staff, and this MCP serves the client directory. Clients
+    carry no system role, which is why there is no role column here.
+    """
     with db_conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO users (email, role, full_name)
-            VALUES ('stranger@example.com', 'ANALYST', 'Stra Nger')
-            ON CONFLICT (email) DO UPDATE SET role = EXCLUDED.role
+            INSERT INTO clients (email, full_name)
+            VALUES ('stranger@example.com', 'Stra Nger')
+            ON CONFLICT (email) DO UPDATE SET full_name = EXCLUDED.full_name
             RETURNING id::text, email
             """,
         )
@@ -72,7 +84,7 @@ def other_user(db_conn):
     db_conn.commit()
     yield {"id": user_id, "email": email}
     with db_conn.cursor() as cur:
-        cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+        cur.execute("DELETE FROM clients WHERE id = %s", (user_id,))
     db_conn.commit()
 
 
@@ -83,4 +95,8 @@ def fixture_ids():
         "analyst_id": ANALYST_ID,
         "admin_sub": ADMIN_SUB,
         "admin_id": ADMIN_ID,
+        # A seeded client. The self-read ACL (caller_sub == target email) can only be
+        # exercised by an identity that actually has a row in `clients` — staff do not.
+        "client_sub": JUAN_SUB,
+        "client_id": JUAN_ID,
     }
