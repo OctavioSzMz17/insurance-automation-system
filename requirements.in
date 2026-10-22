@@ -41,7 +41,7 @@ pypdf>=6.10,<7
 anthropic>=0.39,<1
 openai>=1.55,<2
 google-generativeai>=0.8,<1
-langgraph>=0.2,<1
+langgraph>=1.2.16,<2
 fastapi>=0.136,<1
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
