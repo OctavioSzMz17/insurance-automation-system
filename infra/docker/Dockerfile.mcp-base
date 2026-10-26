@@ -10,7 +10,7 @@
 # Each per-MCP Dockerfile extends this image, sets MCP_DOMAIN, and exposes the right port.
 
 # ── Builder ──────────────────────────────────────────────────────────────────
-FROM python:3.12-slim@sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dcf1ecbdfdfe203 AS builder
+FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -39,7 +39,7 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --require-hashes --no-deps -r requirements.txt
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
-FROM python:3.12-slim@sha256:090ba77e2958f6af52a5341f788b50b032dd4ca28377d2893dcf1ecbdfdfe203 AS runtime
+FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
